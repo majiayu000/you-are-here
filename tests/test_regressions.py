@@ -1,0 +1,291 @@
+"""Regression tests for review findings: python3 -m unittest discover -s tests"""
+import concurrent.futures
+import copy
+import json
+import os
+import random
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+PMAP = os.path.join(ROOT, "scripts", "pmap.py")
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, HERE)
+import pmap  # noqa: E402
+from test_pmap import MAP, put, read, sh  # noqa: E402
+
+
+class Repo:
+    def __init__(self, tmp):
+        self.dir = os.path.join(tmp, "repo")
+        self.out = os.path.join(tmp, "out")
+        self.env = {**os.environ, "XDG_CONFIG_HOME": os.path.join(tmp, "cfg"),
+                    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        os.makedirs(self.dir)
+        sh("git", "init", "-q", self.dir)
+
+    def commit(self, path, text, msg, date=None):
+        full = os.path.join(self.dir, path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        put(full, text, "a")
+        sh("git", "-C", self.dir, "add", "-A")
+        env = dict(self.env)
+        if date:
+            env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+        sh("git", "-C", self.dir, "commit", "-qm", msg, env=env)
+
+    def pmap(self, *args, check=True):
+        return sh(sys.executable, PMAP, *args, self.dir, "--out", self.out, env=self.env, check=check)
+
+    def facts(self):
+        return json.loads(read(os.path.join(self.out, "facts.json")))
+
+    def write_map(self, m):
+        put(os.path.join(self.out, "map.json"), json.dumps(m))
+
+    def cycle(self, m=MAP):
+        self.pmap("collect", "--no-gh")
+        self.write_map(m)
+        self.pmap("render")
+
+
+class Worktree(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.r = Repo(self.tmp.name)
+        self.r.commit("src/core.py", "x = 1\n", "init")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_first_status_line_keeps_its_path(self):
+        put(os.path.join(self.r.dir, "src", "core.py"), "y\n", "a")  # " M src/core.py" is the first line
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual(self.r.facts()["git"]["worktree"]["paths"], ["src/core.py"])
+
+    def test_uncommitted_edit_reaches_delta(self):
+        self.r.cycle()
+        put(os.path.join(self.r.dir, "src", "core.py"), "y\n", "a")
+        self.r.pmap("collect", "--no-gh")
+        dl = self.r.facts()["delta"]
+        self.assertEqual(dl["worktree_changed"], ["src/core.py"])
+        self.assertEqual(dl["touched_parts"], {"core": 1})
+
+    def test_unicode_and_space_paths(self):
+        self.r.cycle()
+        self.r.commit("src/另一个 文件.py", "w\n", "unicode commit")
+        put(os.path.join(self.r.dir, "src", "中文 file.py"), "z\n")
+        self.r.pmap("collect", "--no-gh")
+        f = self.r.facts()
+        self.assertIn("src/另一个 文件.py", f["git"]["changed_files"])
+        self.assertIn("src/中文 file.py", f["delta"]["worktree_changed"])
+        self.assertEqual(f["delta"]["touched_parts"], {"core": 2})
+        self.assertEqual(f["delta"]["unmapped_files"], [])
+
+
+class Baseline(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.r = Repo(self.tmp.name)
+        self.r.commit("src/core.py", "x = 1\n", "init")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_commit_between_collect_and_render_is_not_lost(self):
+        self.r.cycle()
+        self.r.pmap("collect", "--no-gh")
+        self.r.commit("src/core.py", "mid\n", "MIDDLE commit")  # lands while the agent writes the map
+        self.r.write_map(MAP)
+        self.r.pmap("render")
+        self.assertIn("1 new commits", self.r.pmap("status", "--commits", "1").stdout)
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual([c["subject"] for c in self.r.facts()["git"]["commits"]], ["MIDDLE commit"])
+
+    def test_old_dated_commit_is_seen(self):
+        self.r.cycle()
+        self.r.commit("src/core.py", "old\n", "pushed late", date="2020-01-01T00:00:00+00:00")
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual([c["subject"] for c in self.r.facts()["git"]["commits"]], ["pushed late"])
+
+    def test_already_covered_commits_are_not_repeated(self):
+        self.r.cycle()
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual(self.r.facts()["git"]["commits"], [])
+
+    def test_lightweight_tag_on_old_commit(self):
+        self.r.cycle()
+        sh("git", "-C", self.r.dir, "tag", "v1.0")
+        st = json.loads(self.r.pmap("status", "--json").stdout)
+        self.assertEqual((st["status"], st["new_tags"]), ("stale", ["v1.0"]))
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual(self.r.facts()["delta"]["new_tags"], ["v1.0"])
+
+    def test_delta_uses_rendered_snapshot_not_working_map(self):
+        self.r.cycle()
+        broken = copy.deepcopy(MAP)
+        broken["parts"][0]["paths"] = ["nowhere"]
+        broken["parts"][0]["status"] = "bogus"  # fails validation, never rendered
+        self.r.write_map(broken)
+        self.assertNotEqual(self.r.pmap("render", check=False).returncode, 0)
+        put(os.path.join(self.r.dir, "src", "core.py"), "y\n", "a")
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual(self.r.facts()["delta"]["touched_parts"], {"core": 1})
+
+    def test_empty_repo(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = Repo(t)
+            out = r.pmap("collect", "--no-gh").stdout
+            self.assertIn("repository has no commits yet", out)
+            g = r.facts()["git"]
+            self.assertEqual((g["head"], g["commits"]), (None, []))
+
+
+class Safety(unittest.TestCase):
+    def test_chain_status_injection_rejected_and_escaped(self):
+        m = copy.deepcopy(MAP)
+        evil = 'x"><img src=x onerror=alert(1)>'
+        m["chain"]["nodes"][0]["status"] = evil
+        self.assertTrue(any("chain.nodes[0].status" in e for e in pmap.validate(m)))
+        page = pmap.render_html(m, None, {}, [], dict(pmap.DEFAULT_STYLE), None)  # even if validation is bypassed
+        self.assertNotIn("<img", page)
+
+    def test_hostile_text_is_escaped(self):
+        m = copy.deepcopy(MAP)
+        m["project"]["name"] = "<script>alert(1)</script>"
+        m["chain"]["edges"][0]["why"] = '"><svg onload=alert(1)>'
+        page = pmap.render_html(m, None, {}, [], dict(pmap.DEFAULT_STYLE), None)
+        self.assertNotIn("<script>alert", page)
+        self.assertNotIn("<svg onload", page)
+
+    def test_validate_pass_implies_render_ok(self):
+        """Fuzz: break one field at a time; anything validate accepts must render."""
+        rnd = random.Random(7)
+        junk = [None, 1, "", "x", [], {}, [1], [None], {"a": 1}, True, -1, [[1]], ["", None]]
+        paths = []
+
+        def walk(o, p):
+            paths.append(p)
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    walk(v, p + [k])
+            elif isinstance(o, list):
+                for i, v in enumerate(o):
+                    walk(v, p + [i])
+        walk(MAP, [])
+        for _ in range(600):
+            m = copy.deepcopy(MAP)
+            p = rnd.choice(paths[1:])
+            o = m
+            for k in p[:-1]:
+                o = o[k]
+            o[p[-1]] = copy.deepcopy(rnd.choice(junk))
+            if pmap.validate(m):
+                continue
+            try:
+                pmap.render_html(m, None, {}, [], dict(pmap.DEFAULT_STYLE), None)
+                pmap.diff_maps(MAP, m)
+                pmap.diff_maps(m, MAP)
+            except Exception as e:  # noqa: BLE001
+                self.fail(f"validate passed but render crashed at {p}: {e!r}")
+
+    def test_out_into_existing_dir_writes_no_gitignore(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = Repo(t)
+            r.commit("a.txt", "a\n", "init")
+            sh(sys.executable, PMAP, "collect", r.dir, "--out", r.dir, "--no-gh", env=r.env)
+            self.assertFalse(os.path.exists(os.path.join(r.dir, ".gitignore")))
+            r.pmap("collect", "--no-gh")  # a fresh out dir is ours: it ignores itself
+            self.assertEqual(read(os.path.join(r.out, ".gitignore")), "*\n")
+
+    def test_concurrent_renders_do_not_corrupt(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = Repo(t)
+            r.commit("src/core.py", "x\n", "init")
+            r.cycle()
+
+            def go(_):
+                p = subprocess.run([sys.executable, PMAP, "render", r.dir, "--out", r.out],
+                                   capture_output=True, text=True, env=r.env)
+                return p.returncode, p.stderr
+            with concurrent.futures.ThreadPoolExecutor(6) as ex:
+                res = list(ex.map(go, range(12)))
+            for code, err in res:
+                self.assertNotIn("Traceback", err)
+                if code:
+                    self.assertIn("another run", err)
+            ok = sum(1 for c, _ in res if c == 0)
+            self.assertGreaterEqual(ok, 1)
+            self.assertEqual(len(os.listdir(os.path.join(r.out, "history"))), ok + 1)
+            json.loads(read(os.path.join(r.out, "state.json")))
+            self.assertFalse([f for f in os.listdir(r.out) if f.startswith(".tmp-") or f == ".lock"])
+
+
+class Remotes(unittest.TestCase):
+    def test_github_remote_forms(self):
+        cases = {
+            "https://github.com/o/r.git": ("o/r", "https://github.com/o/r"),
+            "git@github.com:o/r.git": ("o/r", "https://github.com/o/r"),
+            "git@github-work:o/r.git": ("o/r", "https://github.com/o/r"),
+            "ssh://git@github.com:22/o/r.git": ("o/r", "https://github.com/o/r"),
+            "https://github.acme.io/team/r": ("team/r", "https://github.acme.io/team/r"),
+        }
+        for url, (slug, web) in cases.items():
+            g = pmap.github_remote(url)
+            self.assertEqual((g["slug"], g["web"]), (slug, web), url)
+        self.assertEqual(pmap.github_remote("git@github.acme.io:team/r.git")["gh"], "github.acme.io/team/r")
+        for url in ("https://gitlab.com/o/r.git", "", "not a url"):
+            self.assertIsNone(pmap.github_remote(url), url)
+
+    def test_paths_globs_and_dot_slash(self):
+        m = {"parts": [{"id": "a", "paths": ["./src/a"]}, {"id": "b", "paths": ["src/**/*.ts"]}]}
+        hits, unmapped = pmap.touched_parts(m, ["src/a/x.py", "src/b/c/y.ts", "README.md"])
+        self.assertEqual((hits, unmapped), ({"a": 1, "b": 1}, ["README.md"]))
+
+
+class Installer(unittest.TestCase):
+    def run_install(self, home, *args, src=ROOT):
+        return subprocess.run([sys.executable, os.path.join(src, "install.py"), *args],
+                              capture_output=True, text=True, env={**os.environ, "HOME": home})
+
+    def test_symlinked_source_is_idempotent_and_uninstalls(self):
+        with tempfile.TemporaryDirectory() as t:
+            home = os.path.join(t, "home")
+            link = os.path.join(t, "src-link")
+            os.makedirs(home)
+            os.symlink(ROOT, link)
+            self.assertEqual(self.run_install(home, "--all", src=link).returncode, 0)
+            again = self.run_install(home, "--all", src=link).stdout
+            self.assertNotIn("skip", again)
+            self.run_install(home, "--uninstall", src=link)
+            left = [os.path.join(dp, f) for dp, dn, fs in os.walk(home) for f in fs + dn if "you-are-here" in f]
+            self.assertEqual(left, [])
+
+    def test_codex_toml_parses_with_windows_path(self):
+        try:
+            import tomllib
+        except ImportError:
+            self.skipTest("tomllib needs Python 3.11+")
+        text = read(os.path.join(ROOT, "agents", "codex.toml")).replace("{{SKILL_DIR}}", r"C:\Users\me\skills\you-are-here")
+        self.assertIn(r"C:\Users", tomllib.loads(text)["developer_instructions"])
+
+    def test_broken_markers_stop_the_installer(self):
+        with tempfile.TemporaryDirectory() as home:
+            agents = os.path.join(home, ".codex", "AGENTS.md")
+            os.makedirs(os.path.dirname(agents))
+            for body in ("mine\n<!-- you-are-here:begin -->\nhalf\n",
+                         "<!-- you-are-here:begin -->\na\n<!-- you-are-here:end -->\n" * 2):
+                put(agents, body)
+                for args in (("--rules",), ("--uninstall",)):
+                    p = self.run_install(home, *args)
+                    self.assertNotEqual(p.returncode, 0, (body, args))
+                    self.assertIn("markers", p.stderr)
+                    self.assertEqual(read(agents), body)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -12,7 +12,9 @@ Agent-neutral (Claude Code, Codex, Grok, ...). Python 3.8+ stdlib only.
 DIR defaults to <repo>/.project-map (self-ignored via its own .gitignore).
 """
 import argparse
+import contextlib
 import datetime as dt
+import fnmatch
 import html
 import json
 import os
@@ -20,6 +22,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 SCHEMA_VERSION = 1
 PART_STATUS = ("done", "in_progress", "not_started", "stuck")
@@ -37,17 +41,22 @@ def now_iso():
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def run(cmd, cwd=None, timeout=30):
-    """Run a command; return (ok, stdout). Never raises."""
+def run(cmd, cwd=None, timeout=30, env=None, strip=True):
+    """Run a command; return (ok, output). Never raises. Output is stdout on success, stderr otherwise."""
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
-        return p.returncode == 0, p.stdout.strip() if p.returncode == 0 else (p.stderr or p.stdout).strip()
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, timeout=timeout, env=env)
     except (OSError, subprocess.TimeoutExpired) as e:
         return False, str(e)
+    out = (p.stdout if p.returncode == 0 else (p.stderr or p.stdout)).decode("utf-8", "replace")
+    return p.returncode == 0, out.strip() if strip else out
 
 
-def git(repo, *args, timeout=30):
-    return run(["git", "-C", repo, *args], timeout=timeout)
+GIT_ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0"}
+
+
+def git(repo, *args, timeout=30, strip=True):
+    # read-only: no optional index refresh, raw (unquoted) paths
+    return run(["git", "-C", repo, "-c", "core.quotepath=off", *args], timeout=timeout, env=GIT_ENV, strip=strip)
 
 
 def load_json(path, default=None):
@@ -58,22 +67,62 @@ def load_json(path, default=None):
         return default
 
 
+def write_text(path, text):
+    """Atomic write through a unique temp file, safe against concurrent writers."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=os.path.basename(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+
 def dump_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, path)
+    write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+@contextlib.contextmanager
+def locked(d, stale=900):
+    """One collect/render at a time per output dir. A lock older than `stale` seconds is taken over."""
+    lock = os.path.join(d, ".lock")
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(lock)
+            except OSError:
+                continue
+            if age < stale:
+                sys.exit(f"pmap: another run is using {d} (lock {int(age)}s old); try again shortly")
+            os.remove(lock)
+    else:
+        sys.exit(f"pmap: could not take the lock in {d}")
+    try:
+        yield
+    finally:
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
 
 
 def out_dir(repo, out):
     d = os.path.abspath(out) if out else os.path.join(repo, ".project-map")
+    created = not os.path.exists(d)
     os.makedirs(d, exist_ok=True)
     gi = os.path.join(d, ".gitignore")
-    if not os.path.exists(gi):
-        with open(gi, "w") as f:
-            f.write("*\n")
+    # only self-ignore a folder we own; never drop a catch-all .gitignore into an existing dir
+    if (created or not out) and not os.path.exists(gi):
+        write_text(gi, "*\n")
     return d
 
 
@@ -84,64 +133,139 @@ def repo_root(path):
     return top
 
 
+def parse_remote(url):
+    """(host, owner, repo) from https / ssh / scp-style remotes, else None."""
+    url = (url or "").strip()
+    m = (re.match(r"^[a-z+]+://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+?)/([^/]+?)(?:\.git)?/?$", url)
+         or re.match(r"^(?:[^@/]+@)?([^/:]+):/?(.+?)/([^/]+?)(?:\.git)?/?$", url))
+    return (m.group(1).lower(), m.group(2), m.group(3)) if m else None
+
+
+def github_remote(url):
+    """{'slug', 'web', 'gh'} for GitHub / GitHub Enterprise remotes (incl. ssh host aliases), else None."""
+    r = parse_remote(url)
+    if not r or "github" not in r[0]:
+        return None
+    host, owner, repo = r
+    if host == "github.com" or "." not in host:  # "." absent: an ssh alias like github-work -> github.com
+        return {"slug": f"{owner}/{repo}", "web": f"https://github.com/{owner}/{repo}", "gh": f"{owner}/{repo}"}
+    return {"slug": f"{owner}/{repo}", "web": f"https://{host}/{owner}/{repo}", "gh": f"{host}/{owner}/{repo}"}
+
+
 def github_slug(url):
-    m = re.search(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", url or "")
-    return f"{m.group(1)}/{m.group(2)}" if m else None
+    g = github_remote(url)
+    return g["slug"] if g else None
 
 
 # ---------------------------------------------------------------- collect
 
-def collect_git(repo, state):
-    f = {"root": repo, "name": os.path.basename(repo)}
-    f["head"] = git(repo, "rev-parse", "--short", "HEAD")[1]
-    f["branch"] = git(repo, "rev-parse", "--abbrev-ref", "HEAD")[1]
-    ok, url = git(repo, "remote", "get-url", "origin")
-    f["github"] = github_slug(url) if ok else None
-    ok, ab = git(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}")
-    if ok and len(ab.split()) == 2:
-        a, b = ab.split()
-        f["upstream"] = {"ahead": int(a), "behind": int(b)}
-    ok, gitdir = git(repo, "rev-parse", "--git-dir")
-    fh = os.path.join(repo, gitdir, "FETCH_HEAD") if ok else ""
-    if fh and os.path.exists(fh):
-        f["last_fetch"] = dt.datetime.fromtimestamp(os.path.getmtime(fh)).astimezone().isoformat(timespec="minutes")
+def ref_shas(repo):
+    """Full shas of the refs a map covers: HEAD, its upstream, origin/HEAD."""
+    out = {}
+    for r in ("HEAD", "@{u}", "origin/HEAD"):
+        ok, sha = git(repo, "rev-parse", "--verify", "-q", r + "^{commit}")
+        if ok and sha:
+            out[r] = sha
+    return out
 
-    # Commits: HEAD + upstream + origin/HEAD, so work that only exists remotely is visible.
-    refs = ["HEAD"]
-    for r in ("@{u}", "origin/HEAD"):
-        if git(repo, "rev-parse", "--verify", "-q", r)[0]:
-            refs.append(r)
-    since = state.get("last_render")  # baseline = what the last rendered map already covered
-    rng = [f"--since={since}"] if since else ["-n", "80"]
-    fmt = "%x02%h%x03%cI%x03%D%x03%s"
-    ok, log = git(repo, "log", *rng, "--name-only", f"--format={fmt}", *refs)
-    commits = []
-    if ok:
-        for block in log.split("\x02")[1:]:
-            head, _, files = block.partition("\n")
-            sha, date, decor, subject = (head.split("\x03") + ["", "", "", ""])[:4]
-            fl = [x for x in files.splitlines() if x.strip()]
-            commits.append({"sha": sha, "date": date, "refs": decor, "subject": subject,
-                            "files": fl[:30], "files_total": len(fl)})
-    f["commits"] = commits
-    f["changed_files"] = sorted({p for c in commits for p in c["files"]})
 
-    ok, st = git(repo, "status", "--porcelain=v1")
-    lines = st.splitlines() if ok and st else []
-    f["worktree"] = {
-        "modified": sum(1 for l in lines if not l.startswith("??")),
-        "untracked": sum(1 for l in lines if l.startswith("??")),
-        "paths": [l[3:] for l in lines[:60]],
-    }
+def tag_names(repo):
+    ok, out = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/tags")
+    return sorted(out.splitlines()) if ok and out else []
+
+
+def worktree(repo):
+    """Porcelain status parsed with -z (exact paths), plus an mtime/size fingerprint per path."""
+    ok, raw = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=normal", strip=False)
+    entries = []
+    if ok and raw:
+        toks = raw.split("\0")
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            i += 1
+            if len(t) < 4:
+                continue
+            code, path = t[:2], t[3:]
+            if code[0] in "RC":  # rename/copy: the next token is the source path
+                i += 1
+            entries.append((code, path))
     fp = {}
-    for l in lines[:500]:
-        path = l[3:].split(" -> ")[-1].strip('"')
+    for _, path in entries[:500]:
         try:
             st = os.stat(os.path.join(repo, path))
             fp[path] = [int(st.st_mtime), st.st_size]
         except OSError:
             fp[path] = None  # deleted
-    f["_worktree_fp"] = fp
+    summary = {"modified": sum(1 for c, _ in entries if c != "??"),
+               "untracked": sum(1 for c, _ in entries if c == "??"),
+               "paths": [p for _, p in entries[:60]]}
+    return summary, fp
+
+
+def log_commits(repo, rng, warnings):
+    fmt = "%x02%h%x03%cI%x03%D%x03%s"
+    ok, log = git(repo, "log", *rng, "--name-only", f"--format={fmt}", timeout=60)
+    if not ok:
+        warnings.append(f"git log failed: {log[:200]}")
+        return []
+    commits = []
+    for block in log.split("\x02")[1:]:
+        head, _, files = block.partition("\n")
+        sha, date, decor, subject = (head.split("\x03") + ["", "", "", ""])[:4]
+        fl = [x for x in files.splitlines() if x.strip()]
+        commits.append({"sha": sha, "date": date, "refs": decor, "subject": subject,
+                        "files": fl[:30], "files_total": len(fl)})
+    return commits
+
+
+def new_commit_range(repo, baseline, state, warnings):
+    """Revisions for `git log`: everything reachable from the current refs but not from the last map's refs."""
+    refs = list(ref_shas(repo).values())
+    if not refs:
+        return None
+    old = [s for s in (baseline.get("refs") or {}).values() if git(repo, "cat-file", "-e", s + "^{commit}")[0]]
+    if old:
+        return refs + ["--not"] + old
+    if state.get("last_render"):
+        warnings.append("no usable baseline refs (history rewritten or old map): falling back to commit dates")
+        return [f"--since={state['last_render']}"] + refs
+    return ["-n", "80"] + refs
+
+
+def collect_git(repo, baseline, state, incremental, warnings):
+    f = {"root": repo, "name": os.path.basename(repo)}
+    ok, head = git(repo, "rev-parse", "--short", "HEAD")
+    f["head"] = head if ok else None
+    ok, branch = git(repo, "symbolic-ref", "--short", "-q", "HEAD")
+    f["branch"] = branch if ok else ("(detached)" if f["head"] else None)
+    if not f["head"]:
+        warnings.append("repository has no commits yet")
+    ok, url = git(repo, "remote", "get-url", "origin")
+    gr = github_remote(url) if ok else None
+    f["github"] = gr["slug"] if gr else None
+    f["github_web"] = gr["web"] if gr else None
+    f["_gh_repo"] = gr["gh"] if gr else None
+    if ok and not gr:
+        warnings.append("origin is not a GitHub remote: issues/PRs/CI skipped")
+    ok, ab = git(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+    if ok and len(ab.split()) == 2:
+        a, b = ab.split()
+        f["upstream"] = {"ahead": int(a), "behind": int(b)}
+    ok, gitdir = git(repo, "rev-parse", "--absolute-git-dir")
+    fh = os.path.join(gitdir, "FETCH_HEAD") if ok else ""
+    if fh and os.path.exists(fh):
+        f["last_fetch"] = dt.datetime.fromtimestamp(os.path.getmtime(fh)).astimezone().isoformat(timespec="minutes")
+    ok, shallow = git(repo, "rev-parse", "--is-shallow-repository")
+    if ok and shallow == "true":
+        warnings.append("shallow clone: history before the graft point is not visible")
+
+    rng = new_commit_range(repo, baseline, state, warnings) if incremental else (
+        ["-n", "80"] + list(ref_shas(repo).values()) if f["head"] else None)
+    f["commits"] = log_commits(repo, rng, warnings) if rng else []
+    f["changed_files"] = sorted({p for c in f["commits"] for p in c["files"]})
+
+    f["worktree"], f["_worktree_fp"] = worktree(repo)
     ok, br = git(repo, "for-each-ref", "--sort=-committerdate", "--count=15",
                  "--format=%(refname:short)\x03%(committerdate:iso-strict)\x03%(upstream:track)", "refs/heads")
     f["branches"] = [dict(zip(("name", "date", "track"), l.split("\x03"))) for l in br.splitlines()] if ok and br else []
@@ -161,28 +285,38 @@ def collect_git(repo, state):
     return f
 
 
-def collect_github(slug, warnings):
+def collect_github(repo_arg, warnings):
     if not shutil.which("gh"):
         warnings.append("gh not installed: issues/PRs/CI skipped")
         return None
-    R = ["-R", slug]
+
+    def gh_json(args, what, timeout=20):
+        ok, out = run(["gh", *args], timeout=timeout)
+        if not ok:
+            warnings.append(f"gh {what} failed: {out[:200]}")
+            return None
+        try:
+            return json.loads(out)
+        except ValueError:
+            warnings.append(f"gh {what}: unreadable output")
+            return None
+
+    R = ["-R", repo_arg]
     g = {}
-    ok, out = run(["gh", "repo", "view", slug, "--json", "defaultBranchRef"], timeout=20)
-    default = json.loads(out)["defaultBranchRef"]["name"] if ok else None
+    info = gh_json(["repo", "view", repo_arg, "--json", "defaultBranchRef"], "repo view")
+    default = ((info or {}).get("defaultBranchRef") or {}).get("name")
     g["default_branch"] = default
-    ok, out = run(["gh", "issue", "list", *R, "--state", "open", "--limit", "30",
-                   "--json", "number,title,labels,updatedAt"], timeout=20)
-    if ok:
+    issues = gh_json(["issue", "list", *R, "--state", "open", "--limit", "30",
+                      "--json", "number,title,labels,updatedAt"], "issue list")
+    if issues is not None:
         g["issues"] = [{"number": i["number"], "title": i["title"], "updated": i["updatedAt"],
-                        "labels": [l["name"] for l in i.get("labels", [])]} for i in json.loads(out)]
-    else:
-        warnings.append(f"gh issue list failed: {out[:200]}")
-    ok, out = run(["gh", "pr", "list", *R, "--state", "open", "--limit", "20", "--json",
+                        "labels": [l["name"] for l in i.get("labels") or []]} for i in issues]
+    prs = gh_json(["pr", "list", *R, "--state", "open", "--limit", "20", "--json",
                    "number,title,headRefName,isDraft,reviewDecision,mergeStateStatus,statusCheckRollup,updatedAt"],
-                  timeout=25)
-    if ok:
-        prs = []
-        for p in json.loads(out):
+                  "pr list", timeout=25)
+    if prs is not None:
+        g["prs"] = []
+        for p in prs:
             checks = {"pass": 0, "fail": 0, "pending": 0}
             for c in p.get("statusCheckRollup") or []:
                 v = (c.get("conclusion") or c.get("state") or c.get("status") or "").upper()
@@ -192,20 +326,17 @@ def collect_github(slug, warnings):
                     checks["fail"] += 1
                 else:
                     checks["pending"] += 1
-            prs.append({"number": p["number"], "title": p["title"], "branch": p["headRefName"],
-                        "draft": p["isDraft"], "review": p.get("reviewDecision") or None,
-                        "merge_state": p.get("mergeStateStatus"), "checks": checks, "updated": p["updatedAt"]})
-        g["prs"] = prs
-    else:
-        warnings.append(f"gh pr list failed: {out[:200]}")
+            g["prs"].append({"number": p["number"], "title": p["title"], "branch": p["headRefName"],
+                             "draft": p["isDraft"], "review": p.get("reviewDecision") or None,
+                             "merge_state": p.get("mergeStateStatus"), "checks": checks, "updated": p["updatedAt"]})
     if default:
-        ok, out = run(["gh", "run", "list", *R, "--branch", default, "--limit", "6", "--json",
-                       "databaseId,workflowName,status,conclusion,createdAt,headSha,event"], timeout=20)
-        if ok:
+        runs = gh_json(["run", "list", *R, "--branch", default, "--limit", "6", "--json",
+                        "databaseId,workflowName,status,conclusion,createdAt,headSha,event"], "run list")
+        if runs is not None:
             g["default_branch_runs"] = [{"id": r["databaseId"], "workflow": r["workflowName"],
                                          "status": r["status"], "conclusion": r["conclusion"],
                                          "created": r["createdAt"], "sha": r["headSha"][:7], "event": r["event"]}
-                                        for r in json.loads(out)]
+                                        for r in runs]
     return g
 
 
@@ -233,69 +364,86 @@ def github_delta(old, new):
     return {k: v for k, v in out.items() if v} or "no changes"
 
 
+def path_matcher(patterns):
+    """parts[].paths entries: a directory/file prefix, or a glob (`*`, `?`, `[`). Leading ./ is ignored."""
+    pre, globs = [], []
+    for x in patterns or []:
+        if not isinstance(x, str) or not x.strip():
+            continue
+        x = x.strip()
+        while x.startswith("./"):
+            x = x[2:]
+        (globs if any(c in x for c in "*?[") else pre).append(x.rstrip("/"))
+
+    def match(f):
+        return (any(f == x or f.startswith(x + "/") for x in pre if x)
+                or any(fnmatch.fnmatchcase(f, g) or fnmatch.fnmatchcase(f, g.rstrip("/*") + "/*") for g in globs))
+    return match
+
+
 def touched_parts(prev_map, changed_files):
     """Map changed files onto parts[].paths of the previous map, so the agent can skip untouched parts."""
-    hits = {}
-    for p in (prev_map or {}).get("parts", []):
-        prefixes = [x.rstrip("*").rstrip("/") for x in p.get("paths", []) if x]
-        n = sum(1 for f in changed_files if any(f == x or f.startswith(x + "/") for x in prefixes))
-        if n:
-            hits[p["id"]] = n
-    unmapped = [f for f in changed_files
-                if not any(f == x or f.startswith(x + "/")
-                           for p in (prev_map or {}).get("parts", [])
-                           for x in [y.rstrip("*").rstrip("/") for y in p.get("paths", []) if y])]
+    parts = [(p.get("id"), path_matcher(p.get("paths"))) for p in (prev_map or {}).get("parts") or []
+             if isinstance(p, dict)]
+    hits, unmapped = {}, []
+    for f in changed_files:
+        owners = [pid for pid, m in parts if m(f)]
+        for pid in owners:
+            hits[pid] = hits.get(pid, 0) + 1
+        if not owners:
+            unmapped.append(f)
     return hits, unmapped
 
 
 def cmd_collect(a):
     repo = repo_root(a.repo)
     d = out_dir(repo, a.out)
-    state = load_json(os.path.join(d, "state.json"), {})
-    prev_map = load_json(os.path.join(d, "map.json"))
-    warnings = []
-    facts = {"schema": SCHEMA_VERSION, "collected_at": now_iso(),
-             "mode": "incremental" if prev_map and state.get("last_render") else "initial",
-             "since": state.get("last_render") if prev_map else None}
-    facts["git"] = collect_git(repo, state if facts["mode"] == "incremental" else {})
-    slug = facts["git"].get("github")
-    if slug and not a.no_gh:
-        facts["github"] = collect_github(slug, warnings)
-    elif not slug:
-        warnings.append("no GitHub origin: issues/PRs/CI skipped")
-    fp = facts["git"].pop("_worktree_fp")
+    with locked(d):
+        collect(repo, d, a.no_gh)
+
+
+def collect(repo, d, no_gh):
+    state = load_json(os.path.join(d, "state.json"), {}) or {}
+    # compare against the map that was actually rendered, not a half-written map.json
+    prev_map = load_json(state["last_map"]) if state.get("last_map") else None
     baseline = load_json(os.path.join(d, "baseline.json"), {}) or {}
-    if facts["mode"] == "incremental":
-        # --since is inclusive at second precision: drop commits the last map already covered
-        seen = set(baseline.get("commits") or [])
-        g = facts["git"]
-        g["commits"] = [c for c in g["commits"] if c["sha"] not in seen]
-        g["changed_files"] = sorted({p for c in g["commits"] for p in c["files"]})
-        hits, unmapped = touched_parts(prev_map, facts["git"]["changed_files"])
+    warnings = []
+    incremental = bool(prev_map and state.get("last_render"))
+    facts = {"schema": SCHEMA_VERSION, "collected_at": now_iso(),
+             "mode": "incremental" if incremental else "initial",
+             "since": state.get("last_render") if incremental else None}
+    facts["git"] = g = collect_git(repo, baseline, state, incremental, warnings)
+    gh_repo = g.pop("_gh_repo")
+    if gh_repo and not no_gh:
+        facts["github"] = collect_github(gh_repo, warnings)
+    fp = g.pop("_worktree_fp")
+    tags = tag_names(repo)
+    if incremental:
+        hits, unmapped = touched_parts(prev_map, g["changed_files"])
         old_fp = baseline.get("worktree_fp")
         if old_fp is not None:
             wt = sorted(p for p in fp.keys() | old_fp.keys() if fp.get(p) != old_fp.get(p))
-            for f_ in wt:
-                for pid in [p["id"] for p in prev_map.get("parts", [])
-                            if any(f_ == x.rstrip("/") or f_.startswith(x.rstrip("*").rstrip("/") + "/") for x in p.get("paths", []))]:
-                    hits[pid] = hits.get(pid, 0) + 1
+            wt_hits, _ = touched_parts(prev_map, wt)
+            for pid, n in wt_hits.items():
+                hits[pid] = hits.get(pid, 0) + n
         else:
             wt = None
         facts["delta"] = {"touched_parts": hits, "unmapped_files": unmapped[:80],
                           "worktree_changed": wt[:80] if wt is not None else "unknown (no baseline yet)",
-                          "untouched_parts": [p["id"] for p in prev_map.get("parts", []) if p["id"] not in hits]}
+                          "new_tags": sorted(set(tags) - set(baseline.get("tags") or [])) if "tags" in baseline else [],
+                          "untouched_parts": [p.get("id") for p in prev_map.get("parts") or []
+                                              if isinstance(p, dict) and p.get("id") not in hits]}
         if facts.get("github") and baseline.get("github"):
             facts["delta"]["github"] = github_delta(baseline["github"], facts["github"])
+    # the baseline the *next* run compares against; promoted to baseline.json when this map is rendered
     dump_json(os.path.join(d, "pending_baseline.json"),
-              {"worktree_fp": fp, "github": facts.get("github"),
-               "commits": [c["sha"] for c in facts["git"]["commits"]][:500]})
+              {"refs": ref_shas(repo), "tags": tags, "worktree_fp": fp, "github": facts.get("github")})
     facts["warnings"] = warnings
     dump_json(os.path.join(d, "facts.json"), facts)
     state["last_collect"] = facts["collected_at"]
     state["repo"] = repo
     dump_json(os.path.join(d, "state.json"), state)
 
-    g = facts["git"]
     print(f"mode: {facts['mode']}" + (f" (since {facts['since']})" if facts["since"] else ""))
     print(f"commits: {len(g['commits'])}, changed files: {len(g['changed_files'])}, "
           f"worktree: {g['worktree']['modified']} modified / {g['worktree']['untracked']} untracked")
@@ -303,7 +451,8 @@ def cmd_collect(a):
         dl = facts["delta"]
         wt = dl["worktree_changed"]
         print(f"touched parts: {dl['touched_parts'] or 'none'}; unmapped files: {len(dl['unmapped_files'])}; "
-              f"worktree changed: {len(wt) if isinstance(wt, list) else wt}")
+              f"worktree changed: {len(wt) if isinstance(wt, list) else wt}"
+              + (f"; new tags: {', '.join(dl['new_tags'])}" if dl["new_tags"] else ""))
         if "github" in dl:
             print(f"github: {json.dumps(dl['github'], ensure_ascii=False)[:400]}")
     for w in warnings:
@@ -317,71 +466,153 @@ def cmd_collect(a):
 def validate(m):
     errs = []
 
+    def is_str(v):
+        return isinstance(v, str) and v.strip() != ""
+
     def need(obj, key, where, typ=str):
-        if not isinstance(obj.get(key), typ) or (typ is str and not obj.get(key).strip()):
+        v = obj.get(key)
+        if not isinstance(v, typ) or (typ is str and not v.strip()):
             errs.append(f"{where}.{key}: required {typ.__name__}")
+
+    def opt(obj, key, where, typ):
+        v = obj.get(key)
+        if v is not None and not isinstance(v, typ):
+            errs.append(f"{where}.{key}: must be {typ.__name__ if not isinstance(typ, tuple) else '/'.join(t.__name__ for t in typ)}")
+            return False
+        return True
+
+    def str_list(obj, key, where):
+        v = obj.get(key)
+        if v is not None and not (isinstance(v, list) and all(is_str(x) for x in v)):
+            errs.append(f"{where}.{key}: must be a list of non-empty strings")
+
+    def dicts(obj, key, where):
+        """A list of objects at obj[key] (missing/null -> []); reports type errors."""
+        v = obj.get(key)
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            errs.append(f"{where}{key}: must be a list")
+            return []
+        good = []
+        for i, x in enumerate(v):
+            if isinstance(x, dict):
+                good.append((i, x))
+            else:
+                errs.append(f"{where}{key}[{i}]: must be an object")
+        return good
 
     if not isinstance(m, dict):
         return ["map.json must be an object"]
     need(m, "project", "", dict)
     if isinstance(m.get("project"), dict):
         need(m["project"], "name", "project")
+        opt(m["project"], "summary", "project", str)
+    for key in ("style",):
+        opt(m, key, "", dict)
+    for key in ("generated_at", "lang"):
+        opt(m, key, "", str)
+    str_list(m, "uncertain", "")
+    str_list(m, "sources", "")
+
     ids = set()
-    for i, p in enumerate(m.get("parts") or []):
+    parts = dicts(m, "parts", "")
+    for i, p in parts:
         w = f"parts[{i}]"
         need(p, "id", w)
         need(p, "name", w)
+        for k in ("summary", "waiting_on"):
+            opt(p, k, w, str)
         if p.get("status") not in PART_STATUS:
             errs.append(f"{w}.status: one of {PART_STATUS}")
-        if p.get("status") == "stuck" and not p.get("waiting_on"):
+        if p.get("status") == "stuck" and not is_str(p.get("waiting_on")):
             errs.append(f"{w}.waiting_on: required when status is stuck")
-        if not p.get("evidence") and not p.get("inferred"):
+        str_list(p, "evidence", w)
+        str_list(p, "paths", w)
+        opt(p, "inferred", w, bool)
+        if not p.get("evidence") and p.get("inferred") is not True:
             errs.append(f"{w}: give evidence[] or mark inferred: true")
         pr = p.get("progress")
-        if pr is not None and not (isinstance(pr, dict) and isinstance(pr.get("done"), int)
-                                   and isinstance(pr.get("total"), int) and pr["total"] > 0):
-            errs.append(f"{w}.progress: {{done:int, total:int>0, label?}}")
-        if p.get("id") in ids:
-            errs.append(f"{w}.id: duplicate {p.get('id')}")
-        ids.add(p.get("id"))
-    if not m.get("parts"):
+        if pr is not None and not (isinstance(pr, dict) and type(pr.get("done")) is int
+                                   and type(pr.get("total")) is int and pr["total"] > 0
+                                   and 0 <= pr["done"] <= pr["total"] and isinstance(pr.get("label", ""), str)):
+            errs.append(f"{w}.progress: {{done:int 0..total, total:int>0, label?:str}}")
+        if isinstance(p.get("id"), str) and p["id"] in ids:
+            errs.append(f"{w}.id: duplicate {p['id']}")
+        if isinstance(p.get("id"), str):
+            ids.add(p["id"])
+    if not parts:
         errs.append("parts: at least one part")
+
     cur = 0
-    for i, s in enumerate(m.get("milestones") or []):
-        need(s, "name", f"milestones[{i}]")
+    ms = dicts(m, "milestones", "")
+    for i, s in ms:
+        w = f"milestones[{i}]"
+        need(s, "name", w)
+        for k in ("date", "note"):
+            opt(s, k, w, str)
+        opt(s, "proposed", w, bool)
         if s.get("status") not in MS_STATUS:
-            errs.append(f"milestones[{i}].status: one of {MS_STATUS}")
+            errs.append(f"{w}.status: one of {MS_STATUS}")
         cur += s.get("status") == "current"
-    if m.get("milestones") and cur != 1:
+    if ms and cur != 1:
         errs.append("milestones: exactly one must be status current")
-    for i, r in enumerate(m.get("remaining") or []):
+    for i, r in dicts(m, "remaining", ""):
         need(r, "label", f"remaining[{i}]")
+        opt(r, "note", f"remaining[{i}]", str)
         if r.get("status") not in PART_STATUS:
             errs.append(f"remaining[{i}].status: one of {PART_STATUS}")
-    ch = m.get("chain") or {}
-    nids = set()
-    for i, n in enumerate(ch.get("nodes") or []):
-        need(n, "id", f"chain.nodes[{i}]")
-        need(n, "label", f"chain.nodes[{i}]")
-        nids.add(n.get("id"))
-    for i, e in enumerate(ch.get("edges") or []):
-        if e.get("from") not in nids or e.get("to") not in nids:
-            errs.append(f"chain.edges[{i}]: from/to must be node ids")
-        if e.get("kind") not in EDGE_KIND:
-            errs.append(f"chain.edges[{i}].kind: one of {EDGE_KIND}")
-        if e.get("kind") == "evidence" and not e.get("why"):
-            errs.append(f"chain.edges[{i}].why: required for evidence edges")
+
+    if opt(m, "chain", "", dict):
+        ch = m.get("chain") or {}
+        opt(ch, "title", "chain", str)
+        nids = set()
+        for i, n in dicts(ch, "nodes", "chain."):
+            w = f"chain.nodes[{i}]"
+            need(n, "id", w)
+            need(n, "label", w)
+            opt(n, "sub", w, str)
+            opt(n, "bottleneck", w, bool)
+            if n.get("status") is not None and n.get("status") not in PART_STATUS:
+                errs.append(f"{w}.status: one of {PART_STATUS}")
+            if isinstance(n.get("id"), str):
+                nids.add(n["id"])
+        for i, e in dicts(ch, "edges", "chain."):
+            w = f"chain.edges[{i}]"
+            if not all(isinstance(e.get(k), str) and e[k] in nids for k in ("from", "to")):
+                errs.append(f"{w}: from/to must be node ids")
+            if e.get("kind") not in EDGE_KIND:
+                errs.append(f"{w}.kind: one of {EDGE_KIND}")
+            opt(e, "why", w, str)
+            if e.get("kind") == "evidence" and not is_str(e.get("why")):
+                errs.append(f"{w}.why: required for evidence edges")
+
     if isinstance(m.get("next_step"), dict):
         need(m["next_step"], "title", "next_step")
+        opt(m["next_step"], "why", "next_step", str)
     else:
         errs.append("next_step: required {title, why}")
-    for i, q in enumerate(m.get("decisions") or []):
-        need(q, "question", f"decisions[{i}]")
-        need(q, "default", f"decisions[{i}]")
-    for i, p in enumerate(m.get("panels") or []):
-        need(p, "title", f"panels[{i}]")
-        if p.get("kind") not in ("table", "list", "text"):
-            errs.append(f"panels[{i}].kind: table|list|text")
+    for i, q in dicts(m, "decisions", ""):
+        w = f"decisions[{i}]"
+        need(q, "question", w)
+        need(q, "default", w)
+        opt(q, "deadline", w, str)
+        opt(q, "proposed", w, bool)
+    for i, p in dicts(m, "panels", ""):
+        w = f"panels[{i}]"
+        need(p, "title", w)
+        opt(p, "hint", w, str)
+        kind = p.get("kind")
+        if kind not in ("table", "list", "text"):
+            errs.append(f"{w}.kind: table|list|text")
+        elif kind == "table":
+            if not (isinstance(p.get("columns", []), list) and isinstance(p.get("rows", []), list)
+                    and all(isinstance(r, list) for r in p.get("rows", []))):
+                errs.append(f"{w}: table needs columns[] and rows[[...]]")
+        elif kind == "list" and not isinstance(p.get("items", []), list):
+            errs.append(f"{w}.items: must be a list")
+        elif kind == "text":
+            opt(p, "text", w, str)
     return errs
 
 
@@ -406,9 +637,9 @@ def diff_maps(prev, cur):
     if not prev:
         return {}, []
     L = labels(cur)
-    old = {p["id"]: p for p in prev.get("parts", [])}
+    old = {p["id"]: p for p in (prev.get("parts") or [])}
     marks, lines = {}, []
-    for p in cur.get("parts", []):
+    for p in (cur.get("parts") or []):
         o = old.get(p["id"])
         if not o:
             marks[p["id"]] = L["new"]
@@ -424,24 +655,24 @@ def diff_maps(prev, cur):
             marks[p["id"]] = " · ".join(bits)
             lines.append((p.get("status"), f"{p['name']}: {' · '.join(bits)}"))
     for pid, o in old.items():
-        if pid not in {p["id"] for p in cur.get("parts", [])}:
+        if pid not in {p["id"] for p in (cur.get("parts") or [])}:
             lines.append(("not_started", f"{o['name']}: {L['removed']}"))
-    om = {s["name"]: s.get("status") for s in prev.get("milestones", [])}
-    for s in cur.get("milestones", []):
+    om = {s["name"]: s.get("status") for s in (prev.get("milestones") or [])}
+    for s in (cur.get("milestones") or []):
         if s["name"] in om and om[s["name"]] != s.get("status"):
             lines.append(("done", f"{L['milestone']} {s['name']}: {L['ms_' + om[s['name']]]} → {L['ms_' + s['status']]}"))
     def bottleneck(m):
-        return next((n["label"] for n in (m.get("chain") or {}).get("nodes", []) if n.get("bottleneck")), None)
+        return next((n["label"] for n in ((m.get("chain") or {}).get("nodes") or []) if n.get("bottleneck")), None)
     ob, nb = bottleneck(prev), bottleneck(cur)
     if ob != nb and nb:
         lines.append(("stuck", f"{L['bottleneck']}: {ob or '—'} → {nb}"))
-    onodes = {n["id"]: n for n in (prev.get("chain") or {}).get("nodes", [])}
-    for n in (cur.get("chain") or {}).get("nodes", []):
+    onodes = {n["id"]: n for n in ((prev.get("chain") or {}).get("nodes") or [])}
+    for n in ((cur.get("chain") or {}).get("nodes") or []):
         o = onodes.get(n["id"])
         if o and o.get("status") != n.get("status") and n.get("status") in PART_STATUS and o.get("status") in PART_STATUS:
             lines.append((n["status"], f"{n['label']}: {L[o['status']]} → {L[n['status']]}"))
-    orem = {r["label"]: r.get("status") for r in prev.get("remaining", [])}
-    nrem = {r["label"]: r.get("status") for r in cur.get("remaining", [])}
+    orem = {r["label"]: r.get("status") for r in (prev.get("remaining") or [])}
+    nrem = {r["label"]: r.get("status") for r in (cur.get("remaining") or [])}
     for label in orem.keys() - nrem.keys():
         lines.append(("done", f"{L['remaining']}: {label} ✓"))
     for label in nrem.keys() - orem.keys():
@@ -486,14 +717,14 @@ def labels(m):
 class R:
     """Escaping + reference linking for user-visible text."""
 
-    def __init__(self, slug, shas):
-        self.slug, self.shas = slug, shas
+    def __init__(self, web, shas):
+        self.web, self.shas = web, shas
 
     def __call__(self, s):
         t = html.escape(str(s or ""))
         t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
-        if self.slug:
-            base = f"https://github.com/{self.slug}"
+        if self.web:
+            base = html.escape(self.web, quote=True)
             t = re.sub(r"(?<![\w/&;])#(\d{1,6})\b",
                        lambda m: f'<a href="{base}/issues/{m.group(1)}">#{m.group(1)}</a>', t)
             t = re.sub(r"\b([0-9a-f]{7,12})\b",
@@ -509,6 +740,11 @@ def fmt_time(iso):
         return iso or ""
 
 
+def cls(v, allowed, fallback):
+    """A CSS class fragment from a fixed vocabulary; anything else (e.g. injected markup) falls back."""
+    return v if v in allowed else fallback
+
+
 def badge(status, L):
     return f'<span class="badge s-{status}">{L[status]}</span>'
 
@@ -517,8 +753,9 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
     L = labels(m)
     g = (facts or {}).get("git", {})
     slug = g.get("github")
-    shas = {c["sha"][:7] for c in g.get("commits", [])}
-    r = R(slug, shas)
+    web = g.get("github_web") or (f"https://github.com/{slug}" if slug else None)
+    shas = {c["sha"][:7] for c in g.get("commits") or []}
+    r = R(web, shas)
     P = m["project"]
     parts = m["parts"]
     n_done = sum(p["status"] == "done" for p in parts)
@@ -535,7 +772,8 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
     meta.append(f'<b>{n_done}/{len(parts)}</b> {L["of_done"]}')
     if n_stuck:
         meta.append(f'<span class="stuck-dot"></span><b class="c-stuck">{n_stuck} {L["stuck"]}</b>')
-    repo_link = f' <a class="slug" href="https://github.com/{slug}">{html.escape(slug)}</a>' if slug else ""
+    repo_link = (f' <a class="slug" href="{html.escape(web, quote=True)}">{html.escape(slug)}</a>'
+                 if slug and web else "")
     head = (f'<header><h1>{r(P["name"])}<span class="sub">{L["title"]}</span></h1>'
             f'<p class="summary">{r(P.get("summary", ""))}{repo_link}</p>'
             f'<p class="meta">{" · ".join(meta)}</p></header>')
@@ -546,7 +784,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
     if ms:
         nodes = []
         for i, s in enumerate(ms):
-            st = s["status"]
+            st = cls(s["status"], MS_STATUS, "future")
             seg = ""
             if i < len(ms) - 1:
                 nxt = ms[i + 1]["status"]
@@ -559,7 +797,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
                 f'<span class="ms-note">{r(s.get("date") or L["ms_" + st])}{" · " + r(s["note"]) if s.get("note") else ""}</span>{prop}</li>')
         rem = m.get("remaining") or []
         cur_name = next((s["name"] for s in ms if s["status"] == "current"), "")
-        pills = "".join(f'<span class="pill p-{x["status"]}"><i></i>{r(x["label"])}'
+        pills = "".join(f'<span class="pill p-{cls(x["status"], PART_STATUS, "not_started")}"><i></i>{r(x["label"])}'
                         f'{"<em>" + r(x["note"]) + "</em>" if x.get("note") else ""}</span>' for x in rem)
         left = (f'<div class="left"><span class="big">{len(rem)}</span><span class="cap">{L["left_for"]} {r(cur_name)} {L["items"]}</span>'
                 f'<div class="pills">{pills}</div></div>') if rem else ""
@@ -570,28 +808,28 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
     ch = m.get("chain") or {}
     cn = ch.get("nodes") or []
     if cn:
-        edges = {(e["from"], e["to"]): e for e in ch.get("edges", [])}
+        edges = {(e["from"], e["to"]): e for e in ch.get("edges") or []}
         used = set()
         items = []
         for i, n in enumerate(cn):
-            st = n.get("status", "not_started")
+            st = cls(n.get("status"), PART_STATUS, "not_started")
             bn = f'<span class="bn">{L["bottleneck"]}</span>' if n.get("bottleneck") else ""
             items.append(f'<div class="node n-{st}{" is-bn" if n.get("bottleneck") else ""}">{bn}'
                          f'<b>{r(n["label"])}</b><span>{r(n.get("sub", ""))}</span></div>')
             if i < len(cn) - 1:
                 e = edges.get((n["id"], cn[i + 1]["id"]))
-                kind = e["kind"] if e else "none"
+                kind = cls(e["kind"], EDGE_KIND, "none") if e else "none"
                 if e:
                     used.add((e["from"], e["to"]))
-                tip = html.escape(e.get("why", "")) if e else L["no_edge"]
+                tip = html.escape(e.get("why") or "", quote=True) if e else L["no_edge"]
                 items.append(f'<div class="arrow a-{kind}" title="{tip}"><span></span></div>')
         names = {n["id"]: n["label"] for n in cn}
         why = []
-        for e in ch.get("edges", []):
+        for e in ch.get("edges") or []:
             k = "evidence" if e["kind"] == "evidence" else "inferred"
             extra = "" if (e["from"], e["to"]) in used else f' <span class="tag">{L["other_deps"]}</span>'
             why.append(f'<li class="w-{k}"><b>{r(names[e["from"]])} → {r(names[e["to"]])}</b>{extra}'
-                       f'{"：" if L is TEXT["zh"] else ": "}{r(e.get("why", ""))}</li>')
+                       f'{"：" if L is TEXT["zh"] else ": "}{r(e.get("why") or "")}</li>')
         legend = (f'<div class="legend"><span><i class="lg-e"></i>{L["evidence_edge"]}</span>'
                   f'<span><i class="lg-i"></i>{L["inferred_edge"]}</span>'
                   f'<span><i class="lg-b"></i>{L["bottleneck"]}</span></div>')
@@ -607,13 +845,13 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
         pr = p.get("progress")
         if pr:
             pct = max(0, min(100, round(100 * pr["done"] / pr["total"])))
-            prog = (f'<div class="prog"><div class="pl"><span>{r(pr.get("label", ""))}</span>'
+            prog = (f'<div class="prog"><div class="pl"><span>{r(pr.get("label") or "")}</span>'
                     f'<span>{pr["done"]}/{pr["total"]}</span></div><div class="bar"><i style="width:{pct}%"></i></div></div>')
         chg = f'<span class="chg">{L["changed"]} · {r(marks[p["id"]])}</span>' if p["id"] in marks else ""
         inf = f'<span class="tag">{L["inferred"]}</span>' if p.get("inferred") else ""
         colon = "：" if L is TEXT["zh"] else ": "
         wait = f'<p class="wait">{L["waiting"]}{colon}{r(p["waiting_on"])}</p>' if p.get("waiting_on") else ""
-        ev = " · ".join(r(x) for x in p.get("evidence", [])[:6])
+        ev = " · ".join(r(x) for x in (p.get("evidence") or [])[:6])
         cards.append(f'<article class="part pt-{p["status"]}{" changed" if p["id"] in marks else ""}">'
                      f'<div class="ph">{badge(p["status"], L)}{inf}{chg}</div><h3>{r(p["name"])}</h3>'
                      f'<p>{r(p.get("summary", ""))}</p>{prog}{wait}<footer>{ev}</footer></article>')
@@ -632,10 +870,11 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
         side.append(f'<section class="card decide"><h2>{L["decisions"]}</h2><ul>{qs}</ul></section>')
     since = f'<span class="since">{fmt_time(prev_time)}</span>' if prev_time else ""
     if change_lines:
-        cl = "".join(f'<li><i class="dot-{k}"></i>{r(t)}</li>' for k, t in change_lines)
+        cl = "".join(f'<li><i class="dot-{cls(k, PART_STATUS + ("new",), "new")}"></i>{r(t)}</li>' for k, t in change_lines)
     else:
         cl = f'<li class="muted">{L["first_run"]}</li>'
-    commits = (facts or {}).get("git", {}).get("commits", [])[:6]
+    commits = ((facts or {}).get("git") or {}).get("commits") or []
+    commits = commits[:6]
     cm = "".join(f'<li><span class="t">{fmt_time(c["date"])}</span> {r(c["sha"][:7])} {r(c["subject"])}</li>'
                  for c in commits)
     side.append(f'<section class="card changes"><h2>{L["changes"]}{since}</h2><ul>{cl}</ul>'
@@ -648,13 +887,13 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
     det = []
     for p in m.get("panels") or []:
         if p["kind"] == "table":
-            th = "".join(f"<th>{r(c)}</th>" for c in p.get("columns", []))
-            tr = "".join("<tr>" + "".join(f"<td>{r(c)}</td>" for c in row) + "</tr>" for row in p.get("rows", []))
+            th = "".join(f"<th>{r(c)}</th>" for c in p.get("columns") or [])
+            tr = "".join("<tr>" + "".join(f"<td>{r(c)}</td>" for c in row) + "</tr>" for row in p.get("rows") or [])
             body = f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tr}</tbody></table></div>'
         elif p["kind"] == "list":
-            body = '<ul class="plain">' + "".join(f"<li>{r(x)}</li>" for x in p.get("items", [])) + "</ul>"
+            body = '<ul class="plain">' + "".join(f"<li>{r(x)}</li>" for x in p.get("items") or []) + "</ul>"
         else:
-            body = f'<p>{r(p.get("text", ""))}</p>'
+            body = f'<p>{r(p.get("text") or "")}</p>'
         det.append(f'<details{"" if p.get("collapsed", True) else " open"}><summary><b>{r(p["title"])}</b>'
                    f'<span>{r(p.get("hint", ""))}</span></summary>{body}</details>')
     details = f'<section class="details"><h2>{L["details"]}</h2>{"".join(det)}</section>' if det else ""
@@ -809,6 +1048,11 @@ def load_style(m):
 def cmd_render(a):
     repo = repo_root(a.repo)
     d = out_dir(repo, a.out)
+    with locked(d):
+        render(repo, d)
+
+
+def render(repo, d):
     m = load_json(os.path.join(d, "map.json"))
     if m is None:
         sys.exit(f"pmap: missing or invalid JSON: {os.path.join(d, 'map.json')}")
@@ -821,14 +1065,13 @@ def cmd_render(a):
     m.setdefault("style", {})["lang"] = style["lang"]
     m.setdefault("generated_at", now_iso())
     facts = load_json(os.path.join(d, "facts.json"))
-    state = load_json(os.path.join(d, "state.json"), {})
+    state = load_json(os.path.join(d, "state.json"), {}) or {}
     prev = load_json(state["last_map"]) if state.get("last_map") else None
     marks, lines = diff_maps(prev, m)
     prev_time = (prev.get("generated_at") or state.get("last_render")) if prev else None
     page = render_html(m, facts, marks, lines, style, prev_time)
-    with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
-        f.write(page)
-    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    write_text(os.path.join(d, "index.html"), page)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     snap = os.path.join(d, "history", f"{stamp}.json")
     dump_json(snap, m)
     pend = os.path.join(d, "pending_baseline.json")
@@ -852,15 +1095,19 @@ def cmd_status(a):
     if not since or not os.path.exists(os.path.join(d, "map.json")):
         res.update(status="none", reason="no map yet")
     else:
-        refs = ["HEAD"] + [r for r in ("@{u}", "origin/HEAD") if git(repo, "rev-parse", "--verify", "-q", r)[0]]
-        ok, out = git(repo, "log", f"--since={since}", "--format=%h", *refs)
-        seen = {c[:7] for c in (load_json(os.path.join(d, "baseline.json"), {}) or {}).get("commits") or []}
-        commits = len([h for h in out.split() if h[:7] not in seen]) if ok and out else 0
-        ok, out = git(repo, "for-each-ref", "--format=%(refname:short)\x03%(creatordate:iso-strict)", "refs/tags")
-        new_tags = []
-        if ok and out:
+        baseline = load_json(os.path.join(d, "baseline.json"), {}) or {}
+        rng = new_commit_range(repo, baseline, state, [])
+        ok, out = git(repo, "rev-list", "--count", *(rng or ["HEAD", "--not", "HEAD"])) if rng else (True, "0")
+        if rng and rng[0] == "-n":  # no baseline at all: nothing to compare against
+            ok, out = True, "0"
+        commits = int(out) if ok and out.strip().isdigit() else 0
+        if "tags" in baseline:
+            new_tags = sorted(set(tag_names(repo)) - set(baseline["tags"]))
+        else:  # map rendered by an older version: fall back to tag dates
+            new_tags = []
+            ok, out = git(repo, "for-each-ref", "--format=%(refname:short)\x03%(creatordate:iso-strict)", "refs/tags")
             t0 = dt.datetime.fromisoformat(since)
-            for line in out.splitlines():
+            for line in (out.splitlines() if ok and out else []):
                 name, _, date = line.partition("\x03")
                 try:
                     if dt.datetime.fromisoformat(date.replace("Z", "+00:00")) > t0:

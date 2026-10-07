@@ -39,7 +39,7 @@ milestones use `done | current | future` (exactly one `current`).
       "progress": { "done": 15, "total": 15, "label": "code tasks" },   // only with a real count
       "waiting_on": "required when status is stuck",
       "evidence": ["#139", "e6cef9e", "`specs/progress-ledger/tasks.md`"],  // or "inferred": true
-      "paths": ["src/services/ledger", "src/ui/LedgerPage.tsx"]          // lets the next collect map changed files to this part
+      "paths": ["src/services/ledger", "src/ui/LedgerPage.tsx"]          // dir/file prefixes or globs (src/**/*.ts); lets the next collect map changed files to this part
     }
   ],
 

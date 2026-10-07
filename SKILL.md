@@ -11,6 +11,10 @@ The script does the deterministic work (collecting facts, diffing, rendering); y
 `PMAP` below means `python3 <skill-dir>/scripts/pmap.py`, where `<skill-dir>` is the directory that
 contains this SKILL.md. Python 3.8+ only, no dependencies. `gh` is optional (issues, PRs, CI).
 
+What the script does, so you don't need to read it: read-only `git` (log, status, rev-parse,
+for-each-ref; run with `GIT_OPTIONAL_LOCKS=0`, never fetch) and read-only `gh` (repo view; issue,
+pr and run list). It writes only inside the output dir and holds a lock there while it runs.
+
 ## Rules
 
 - The project is read-only. Write only inside the output dir (default `<repo>/.project-map/`, which
