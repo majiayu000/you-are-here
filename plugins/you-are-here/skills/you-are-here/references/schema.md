@@ -7,6 +7,7 @@ milestones use `done | current | future` (exactly one `current`).
 ```jsonc
 {
   "project": { "name": "keepline", "summary": "one line: what the project is" },
+  "headline": "Ledger merged; main CI is red on one test that PR #140 fixes; #140 needs your review.",
   "style": { "lang": "zh" },                       // optional; theme/accent come from `pmap.py style`
 
   "milestones": [                                   // left → right, past to future
@@ -38,13 +39,20 @@ milestones use `done | current | future` (exactly one `current`).
       "status": "in_progress",
       "summary": "what this part is and where it stands",
       "progress": { "done": 15, "total": 15, "label": "code tasks" },   // only with a real count
+      "open": "not merged; manual check of notifications left",         // what is left when the count is full but it isn't done
       "waiting_on": "required when status is stuck",
       "evidence": ["#139", "e6cef9e", "`specs/progress-ledger/tasks.md`"],  // or "inferred": true
       "paths": ["src/services/ledger", "src/ui/LedgerPage.tsx"]          // dir/file prefixes or globs (src/**/*.ts); lets the next collect map changed files to this part
     }
   ],
 
-  "next_step": { "title": "Review and merge PR #140", "why": "it unblocks main CI and the round-5 PR" },
+  "next_step": {
+    "title": "Review and merge PR #140",
+    "owner": "user",                                // user | agent: who does it
+    "action": "https://github.com/o/r/pull/140",    // the command, link or concrete step
+    "why": "it fixes the only failing test on main",
+    "unblocks": "main CI green, then the round-5 PR"
+  },
   "decisions": [
     { "id": "ship", "question": "Ship round 5 as default?", "default": "yes, as in round 5",
       "options": ["yes, as in round 5", "hold for the failing test"],
@@ -71,6 +79,11 @@ Validation rules worth knowing:
 - evidence edges need `why`
 - `progress.total` > 0; omit `progress` when there is no real count (no made-up percentages)
 - part `id`s are unique and should stay the same across runs
+- `paths` entries match whole path segments: `src` covers `src/a.ts` but not `src-tauri/x.rs`. In a glob,
+  `*` stays inside one directory and `**` crosses directories: `src/services/*.ts` does not cover
+  `src/services/ledger/a.ts`, `src/**/*.ts` does
+- `render` also prints `warning:` lines (bottleneck, edge direction, overlapping paths, evidence format,
+  done vs progress, text length). They never block; fix them unless you have a reason
 - `part` on a chain node or remaining item is a part id. The page uses it to light the same work everywhere you click
 - `decisions[].options` lists real choices. `default` must be one of them. `id` is required only when a chain node's `if` points at the decision
 - `if.option` is the index into that decision's `options`. Nodes without `if` stay on every path. The page draws the default path, and the other path when asked

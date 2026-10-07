@@ -31,9 +31,10 @@ pr and run list). It writes only inside the output dir and holds a lock there wh
 ## What the map means (the same in every agent)
 
 - **Parts** are the 4–8 pieces the project breaks into. Each file belongs to at most one part:
-  `paths` must not overlap. Use directories or globs (`src/sync`, `src/**/*.ts`).
+  `paths` must not overlap. Use directories or globs (`src/sync`, `src/**/*.ts`; `*` stays inside one
+  directory, `**` crosses directories).
 - **Done** means merged to the main branch with nothing known left to verify. Finished code that is
-  unmerged or unverified is `in_progress`, and the summary says what is open.
+  unmerged or unverified is `in_progress`, and its `open` field says what is left.
 - **Stuck** means it cannot move until something outside it happens; `waiting_on` names that thing.
 - **Chain** is the path to the current milestone. Nodes run left to right in the order they must
   finish; an edge `from → to` means `from` has to finish first. The **bottleneck** is the earliest
@@ -42,6 +43,10 @@ pr and run list). It writes only inside the output dir and holds a lock there wh
   a URL. If you have none, mark the part `"inferred": true`.
 - **Milestones** come from the repo (tags, roadmap, plan files). One you made up is
   `"proposed": true`, and only current or future milestones can be proposed.
+- **The current milestone** is the next goal the repo itself names: the next version (an
+  `Unreleased` changelog section, a release doc), an open GitHub milestone, or an epic issue or plan.
+  If there are several, pick the one the most recent commits work toward. A blocker in another repo
+  (an upstream PR, a dependency release) is a node on the chain, not a different milestone.
 - **Progress** needs a real count, never a guess.
 - **Decisions** that go ahead on their own (a `deadline`) must be reversible and local
   (`"reversible": true`). Merging, pushing, releasing, deleting and spending never get a deadline;

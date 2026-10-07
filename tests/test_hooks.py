@@ -61,7 +61,7 @@ class Hooks(unittest.TestCase):
         return sh(sys.executable, os.path.join(PLUGIN, "skills", "you-are-here", "scripts", "pmap.py"), *args,
                   env=self.r.env)
 
-    def calls(self, wait=3.0):
+    def calls(self, wait=10.0):
         end = time.time() + wait
         while time.time() < end:
             files = [f for f in os.listdir(self.tmp.name) if f.startswith("calls.")]

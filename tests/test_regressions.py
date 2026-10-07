@@ -263,6 +263,36 @@ class Remotes(unittest.TestCase):
         hits, unmapped = pmap.touched_parts(m, ["src/a/x.py", "src/b/c/y.ts", "README.md"])
         self.assertEqual((hits, unmapped), ({"a": 1, "b": 1}, ["README.md"]))
 
+    def test_long_urls_become_short_links(self):
+        r = pmap.R("https://github.com/o/app", set())
+        out = r("see https://github.com/o/lib/pull/7 and https://github.com/o/app/blob/abc123/docs/x.md.")
+        self.assertIn('>lib#7</a>', out)
+        self.assertIn('>docs/x.md</a>.', out)
+        self.assertIn('href="https://github.com/o/lib/pull/7"', out)
+        self.assertEqual(pmap.short_url("https://github.com/o/app/pull/3", "o/app"), "#3")
+        self.assertEqual(pmap.classify_evidence("run:42")[:2], ("run", "42"))
+        self.assertNotIn("onmouseover=alert", r('x https://e.x/"onmouseover=alert(1)').split("</a>")[0])
+
+    def test_glob_star_stays_in_one_directory(self):
+        one = pmap.path_matcher(["src/services/*.ts"])
+        self.assertTrue(one("src/services/a.ts"))
+        self.assertFalse(one("src/services/ledger/b.ts"))
+        self.assertFalse(pmap.path_matcher(["src"])("src-tauri/main.rs"))
+        self.assertTrue(pmap.path_matcher(["src/**"])("src/x/y/z.ts"))
+
+    def test_overlap_lint_understands_globs(self):
+        base = {"chain": {}, "headline": "h", "next_step": {"title": "t", "owner": "agent"}}
+        ok = dict(base, parts=[{"id": "a", "paths": ["src/services/*.ts"]}, {"id": "b", "paths": ["src/services/ledger"]}])
+        bad = dict(base, parts=[{"id": "a", "paths": ["src/services/**"]}, {"id": "b", "paths": ["src/services/ledger"]}])
+        self.assertFalse([w for w in pmap.lint(ok) if "overlap" in w])
+        self.assertTrue([w for w in pmap.lint(bad) if "overlap" in w])
+
+    def test_open_field_answers_full_progress(self):
+        base = {"chain": {}, "headline": "h", "next_step": {"title": "t", "owner": "agent"}}
+        p = {"id": "a", "name": "A", "status": "in_progress", "progress": {"done": 3, "total": 3}, "evidence": ["#1"]}
+        self.assertTrue([w for w in pmap.lint(dict(base, parts=[p])) if "progress is 3/3" in w])
+        self.assertFalse([w for w in pmap.lint(dict(base, parts=[dict(p, open="not merged")])) if "progress" in w])
+
 
 class Installer(unittest.TestCase):
     def run_install(self, home, *args, src=ROOT):

@@ -405,6 +405,9 @@ def collect_github(repo_arg, warnings):
 
     def gh_json(args, what, timeout=20):
         ok, out = run(["gh", *args], timeout=timeout)
+        if not ok and not re.search(r"auth|not found|could not resolve to a repository|HTTP 40[134]", out, re.I):
+            time.sleep(1.5)  # transient network errors (EOF, timeouts) usually pass on a second try
+            ok, out = run(["gh", *args], timeout=timeout)
         if not ok:
             warnings.append(f"gh {what} failed: {out[:200]}")
             return None
@@ -477,20 +480,68 @@ def github_delta(old, new):
     return {k: v for k, v in out.items() if v} or "no changes"
 
 
+def clean_path(x):
+    x = x.strip()
+    while x.startswith("./"):
+        x = x[2:]
+    return x.rstrip("/")
+
+
+def glob_regex(g):
+    """Path glob: `*` and `?` stay inside one segment, `**` crosses segments, `[...]` is a class."""
+    out, i = [], 0
+    while i < len(g):
+        c = g[i]
+        if g.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif g.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif c == "*":
+            out.append("[^/]*")
+            i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        elif c == "[":
+            j = g.find("]", i + 1)
+            if j < 0:
+                out.append(re.escape(c))
+                i += 1
+            else:
+                out.append("[" + g[i + 1:j].replace("\\", "\\\\") + "]")
+                i = j + 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("".join(out) + "(?:/.*)?$")  # a glob naming a directory covers what is inside
+
+
+def glob_base(g):
+    """The literal directory a glob starts in (`src/sync/**/*.ts` -> `src/sync`)."""
+    segs = []
+    for seg in g.split("/"):
+        if any(c in seg for c in "*?["):
+            break
+        segs.append(seg)
+    return "/".join(segs)
+
+
 def path_matcher(patterns):
-    """parts[].paths entries: a directory/file prefix, or a glob (`*`, `?`, `[`). Leading ./ is ignored."""
+    """parts[].paths entries: a directory/file prefix, or a glob (`*`, `?`, `[`, `**`). Leading ./ is ignored."""
     pre, globs = [], []
     for x in patterns or []:
         if not isinstance(x, str) or not x.strip():
             continue
-        x = x.strip()
-        while x.startswith("./"):
-            x = x[2:]
-        (globs if any(c in x for c in "*?[") else pre).append(x.rstrip("/"))
+        x = clean_path(x)
+        if any(c in x for c in "*?["):
+            globs.append(glob_regex(x))
+        elif x:
+            pre.append(x)
 
     def match(f):
-        return (any(f == x or f.startswith(x + "/") for x in pre if x)
-                or any(fnmatch.fnmatchcase(f, g) or fnmatch.fnmatchcase(f, g.rstrip("/*") + "/*") for g in globs))
+        return any(f == x or f.startswith(x + "/") for x in pre) or any(g.match(f) for g in globs)
     return match
 
 
@@ -643,7 +694,7 @@ def validate(m):
         w = f"parts[{i}]"
         need(p, "id", w)
         need(p, "name", w)
-        for k in ("summary", "waiting_on"):
+        for k in ("summary", "waiting_on", "open"):
             opt(p, k, w, str)
         if p.get("status") not in PART_STATUS:
             errs.append(f"{w}.status: one of {PART_STATUS}")
@@ -810,22 +861,30 @@ def lint(m):
     owners = []
     for p in parts:
         for x in p.get("paths") or []:
-            x = x.strip()
-            while x.startswith("./"):
-                x = x[2:]
-            owners.append((x.rstrip("/*"), p["id"]))
-    for x, a in owners:
-        for y, b in owners:
-            if a < b and x and y and (x == y or x.startswith(y + "/") or y.startswith(x + "/")):
+            x = clean_path(x)
+            owners.append((x, glob_base(x), any(c in x for c in "*?["), p["id"]))
+    seen_pairs = set()
+    for x, bx, gx, a in owners:
+        for y, by, gy, b in owners:
+            if a >= b or (a, b) in seen_pairs or not bx or not by:
+                continue
+            # literal paths: one contains the other. With a glob: the other's base lies inside its base
+            # and the glob could reach it. Two globs in the same base are reported, to be safe.
+            hit = (bx == by or by.startswith(bx + "/") and (not gx or glob_regex(x).match(by) or "**" in x)
+                   or bx.startswith(by + "/") and (not gy or glob_regex(y).match(bx) or "**" in y))
+            if not gx and not gy:
+                hit = x == y or x.startswith(y + "/") or y.startswith(x + "/")
+            if hit:
+                seen_pairs.add((a, b))
                 w.append(f"parts {a} and {b}: paths overlap ({x} / {y}); give each file one owner")
     for p in parts:
         for ev in p.get("evidence") or []:
             if not EVIDENCE_RE.match(ev.strip()):
                 w.append(f"parts[{p['id']}].evidence '{ev[:40]}': use #123, a short sha, `path`, run:ID or a URL")
         pr = p.get("progress") or {}
-        if pr and pr.get("done") == pr.get("total") and p.get("status") not in ("done",):
+        if pr and pr.get("done") == pr.get("total") and p.get("status") != "done" and not p.get("open"):
             w.append(f"parts[{p['id']}]: progress is {pr['done']}/{pr['total']} but status is {p.get('status')}; "
-                     "say in the summary what is still open (e.g. unverified, not merged)")
+                     "set `open` to what is still left (e.g. not merged, not verified)")
         if p.get("status") == "done" and pr and pr.get("done", 0) < pr.get("total", 0):
             w.append(f"parts[{p['id']}]: done but progress {pr['done']}/{pr['total']}")
         if len(p.get("summary") or "") > BUDGET["summary"]:
@@ -943,7 +1002,7 @@ TEXT = {
            "done_quiet": "已完成", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
            "open_link": "在 GitHub 打开", "waits": "等你确认",
            "better": "变好", "worse": "变坏", "needs_you": "等你", "owner_user": "你来做", "owner_agent": "agent 来做",
-           "unblocks": "做完解锁", "how": "怎么做", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
+           "unblocks": "做完解锁", "how": "怎么做", "open_left": "还差", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
            "ms_done": "Done", "ms_current": "In progress", "ms_future": "Later",
            "title": "Project map", "updated": "Updated", "commits_since": "commits since last", "commits_recent": "recent commits",
@@ -961,7 +1020,7 @@ TEXT = {
            "hide_path": "Hide the other path", "done_quiet": "Done", "scrub_then": "Then", "scrub_now": "Now",
            "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you",
            "better": "better", "worse": "worse", "needs_you": "need you", "owner_user": "You", "owner_agent": "Agent",
-           "unblocks": "Unblocks", "how": "How", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
+           "unblocks": "Unblocks", "how": "How", "open_left": "Still open", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
            "copy_hint": "Copy, then paste back to the agent", "copy": "Copy"},
 }
 
@@ -977,7 +1036,14 @@ class R:
         self.web, self.shas = web, shas
 
     def __call__(self, s):
-        t = html.escape(str(s or ""))
+        raw = str(s or "")
+        links = []
+
+        def keep(m):  # long URLs become short labels; the full URL stays in the link
+            links.append(m.group(0))
+            return f"\x00{len(links) - 1}\x00"
+        raw = URL_RE.sub(keep, raw)
+        t = html.escape(raw)
         t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
         if self.web:
             base = html.escape(self.web, quote=True)
@@ -986,7 +1052,10 @@ class R:
             t = re.sub(r"\b([0-9a-f]{7,12})\b",
                        lambda m: f'<a href="{base}/commit/{m.group(1)}"><code>{m.group(1)}</code></a>'
                        if m.group(1)[:7] in self.shas else m.group(0), t)
-        return t
+        slug = "/".join(self.web.rstrip("/").split("/")[-2:]) if self.web else None
+        return re.sub(r"\x00(\d+)\x00", lambda m: (f'<a href="{html.escape(links[int(m.group(1))], quote=True)}" '
+                                                    f'title="{html.escape(links[int(m.group(1))], quote=True)}">'
+                                                    f'{html.escape(short_url(links[int(m.group(1))], slug))}</a>'), t)
 
 
 def fmt_time(iso):
@@ -1063,10 +1132,36 @@ def parse_deadline(text, generated_at):
     return None
 
 
+URL_RE = re.compile(r"https?://[^\s<>\"'`]+[^\s<>\"'`.,;:!?)\]）。，；]")
+
+
+def short_url(url, slug=None):
+    """A readable label for a long URL: owner/repo#12, a file path, run 123, or host/path."""
+    m = re.match(r"https?://[^/]+/([^/]+/[^/#?]+)/(pull|issues)/(\d+)", url)
+    if m:
+        return f"#{m.group(3)}" if m.group(1) == slug else f"{m.group(1).split('/')[1]}#{m.group(3)}"
+    m = re.match(r"https?://[^/]+/[^/]+/[^/]+/(?:blob|tree)/[^/]+/([^#?]+)", url)
+    if m:
+        return m.group(1)
+    m = re.match(r"https?://[^/]+/[^/]+/[^/]+/actions/runs/(\d+)", url)
+    if m:
+        return f"run {m.group(1)}"
+    m = re.match(r"https?://[^/]+/[^/]+/[^/]+/commit/([0-9a-f]{7})", url)
+    if m:
+        return m.group(1)
+    bare = re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+    return bare if len(bare) <= 48 else bare[:45] + "…"
+
+
 def classify_evidence(raw):
     s = str(raw).strip()
     if len(s) >= 2 and s[0] == "`" and s[-1] == "`":
         s = s[1:-1].strip()
+    if re.fullmatch(r"https?://\S+", s):
+        return "link", s, short_url(s)
+    mm = re.fullmatch(r"run:(\d+)", s)
+    if mm:
+        return "run", mm.group(1), f"run {mm.group(1)}"
     if re.fullmatch(r"#\d{1,6}", s):
         return "issue", s[1:], "#" + s[1:]
     if re.fullmatch(r"[0-9a-fA-F]{7,12}", s):
@@ -1348,6 +1443,8 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         title = r(p["waiting_on"]) if stuck else r(p["name"])
         eyebrow = f'<p class="eyebrow">{r(p["name"])}</p>' if stuck else ""
         summary = f'<p>{r(p.get("summary", ""))}</p>' if p.get("summary") else ""
+        if p.get("open"):
+            summary += f'<p class="open-left"><span>{L["open_left"]}</span> {r(p["open"])}</p>'
         infer = " data-inferred" if p.get("inferred") else ""
         pst = cls(p["status"], PART_STATUS, "not_started")
         card = (f'<article class="part pt-{pst}{" changed" if changed else ""} linkable" '
@@ -1499,6 +1596,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
                  f'<span>{html.escape(L["scrub_now"])}</span><span id="scrubcap"></span></div>')
     payload = {
         "slug": slug,
+        "web": web,
         "peek": peek_db(facts),
         "frames": use_frames,
         "labels": {"expired": L["expired"], "open": L["open_link"]},
@@ -1613,6 +1711,7 @@ aside .card{{padding:16px 18px}}
 .hl-you b{{color:var(--stuck)}} .hl-bn{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .hl-since{{color:var(--dim)}}
 .owner{{float:right;text-transform:none;letter-spacing:0;font-size:12px;padding:1px 8px;border-radius:6px;background:var(--card2)}}
 .o-user{{color:var(--stuck)}} .o-agent{{color:var(--accent)}}
+.open-left{{font-size:13px}} .open-left span{{color:var(--prog);font-weight:600;margin-right:4px}}
 .next .how,.next .unl{{margin:8px 0 0;font-size:13px}} .next .how span,.next .unl span{{color:var(--dim);margin-right:6px}}
 .next{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .next .nt{{font-size:18px;font-weight:650;margin:0 0 6px;color:var(--accent)}}
 .next p{{margin:0;color:var(--mut);font-size:13px}}
@@ -1831,10 +1930,16 @@ SCRIPT = r"""
       text = (db.issues && db.issues[ref]) || (db.prs && db.prs[ref]) || ("#" + ref);
       if (db.issues && db.issues[ref]) text = "#" + ref + " " + db.issues[ref];
       else if (db.prs && db.prs[ref]) text = "#" + ref + " " + db.prs[ref];
-      if (DATA.slug) href = "https://github.com/" + DATA.slug + "/issues/" + ref;
+      if (DATA.web) href = DATA.web + "/issues/" + ref;
     } else if (kind === "commit") {
       text = (db.commits && db.commits[ref]) ? (ref + " " + db.commits[ref]) : ref;
-      if (DATA.slug) href = "https://github.com/" + DATA.slug + "/commit/" + ref;
+      if (DATA.web) href = DATA.web + "/commit/" + ref;
+    } else if (kind === "link") {
+      text = ref;
+      if (/^https?:\/\//.test(ref)) href = ref;
+    } else if (kind === "run") {
+      text = "CI run " + ref;
+      if (DATA.web) href = DATA.web + "/actions/runs/" + ref;
     } else {
       text = ref;
       var files = db.files || {};
