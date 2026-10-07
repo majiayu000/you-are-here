@@ -28,6 +28,9 @@ import time
 SCHEMA_VERSION = 1
 PART_STATUS = ("done", "in_progress", "not_started", "stuck")
 MS_STATUS = ("done", "current", "future")
+OWNERS = ("user", "agent")
+EVIDENCE_RE = re.compile(r"^(#\d+|[0-9a-f]{7,40}|`[^`\n]+`|run:\d+|https?://\S+|[\w./-]+\.[A-Za-z0-9]{1,6})$")
+BUDGET = {"headline": 160, "summary": 160, "sub": 40, "next_step": 90, "uncertain_items": 5, "uncertain": 160}
 EDGE_KIND = ("evidence", "inferred")
 STYLE_FILE = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "you-are-here", "style.json"
@@ -285,6 +288,114 @@ def collect_git(repo, baseline, state, incremental, warnings):
     return f
 
 
+SKIP_DIRS = {".git", "node_modules", "vendor", "dist", "build", "target", ".venv", "venv", "__pycache__",
+             ".project-map", ".next", "coverage"}
+CHECKBOX = re.compile(r"^\s*[-*+]\s+\[([ xX])\]\s+(.*\S)")
+TASK_HEADING = re.compile(r"^#{2,4}\s+((?:[A-Z][\w-]*-)?T\d+\b.*|Task\s+\d+.*|\d+[.)]\s+.*)$")
+
+
+def plan_kind(rel):
+    low = rel.lower()
+    name = os.path.basename(low)
+    if low.startswith(".kiro/specs/") and name == "tasks.md":
+        return "kiro"
+    if low.startswith("specs/") and name == "tasks.md":
+        return "spec-kit"
+    if name in ("plans.md", "plan.md", "execplan.md") or "/exec-plans/" in "/" + low or low.startswith(".agent/"):
+        return "exec-plan"
+    if name in ("task_plan.md", "progress.md"):
+        return "planning-with-files"
+    if name in ("todo.md", "roadmap.md", "tasks.md", "milestones.md", "checklist.md"):
+        return "checklist"
+    return None
+
+
+def checklist(path):
+    """(done, total, open items). Without checkboxes, task headings count and done is None (tracked elsewhere)."""
+    done, total, open_items, headings = 0, 0, [], []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                mm = CHECKBOX.match(line)
+                if not mm:
+                    hh = TASK_HEADING.match(line.rstrip())
+                    if hh:
+                        headings.append(hh.group(1)[:100])
+                    continue
+                total += 1
+                if mm.group(1) in "xX":
+                    done += 1
+                elif len(open_items) < 8:
+                    open_items.append(mm.group(2)[:100])
+    except OSError:
+        return None
+    if not total and headings:
+        return None, len(headings), headings[:8]
+    return done, total, open_items
+
+
+def taskmaster(path):
+    data = load_json(path)
+    if isinstance(data, dict) and "tasks" not in data:  # tagged format: {"master": {"tasks": [...]}}
+        data = next((v for v in data.values() if isinstance(v, dict) and isinstance(v.get("tasks"), list)), {})
+    tasks = (data or {}).get("tasks") if isinstance(data, dict) else None
+    if not isinstance(tasks, list):
+        return None
+    tasks = [t for t in tasks if isinstance(t, dict)]
+    done = sum(1 for t in tasks if str(t.get("status")).lower() in ("done", "completed"))
+    open_items = [f"#{t.get('id')} {str(t.get('title'))[:90]} ({t.get('status')})" for t in tasks
+                  if str(t.get("status")).lower() not in ("done", "completed", "cancelled")][:8]
+    return done, len(tasks), open_items
+
+
+def collect_plans(repo):
+    """Plan files the project already keeps (spec-kit, Kiro, Taskmaster, ExecPlans, checklists)."""
+    plans = []
+    tm = os.path.join(repo, ".taskmaster", "tasks", "tasks.json")
+    if os.path.isfile(tm):
+        r = taskmaster(tm)
+        if r:
+            plans.append({"source": "taskmaster", "path": ".taskmaster/tasks/tasks.json",
+                          "done": r[0], "total": r[1], "open": r[2]})
+    for root, dirs, files in os.walk(repo):
+        rel_root = os.path.relpath(root, repo)
+        depth = 0 if rel_root == "." else rel_root.count(os.sep) + 1
+        dirs[:] = [x for x in sorted(dirs) if x not in SKIP_DIRS and (not x.startswith(".") or x in (".kiro", ".agent"))]
+        if depth >= 4:
+            dirs[:] = []
+        for name in sorted(files):
+            if not name.lower().endswith(".md"):
+                continue
+            rel = name if rel_root == "." else os.path.join(rel_root, name).replace(os.sep, "/")
+            kind = plan_kind(rel)
+            if not kind:
+                continue
+            full = os.path.join(root, name)
+            r = checklist(full)
+            if r and r[1]:
+                plans.append({"source": kind, "path": rel, "done": r[0], "total": r[1], "open": r[2],
+                              "modified": dt.datetime.fromtimestamp(os.path.getmtime(full)).astimezone()
+                              .isoformat(timespec="minutes")})
+    plans.sort(key=lambda p: p.get("modified") or "", reverse=True)  # active plans first
+    plans = plans[:30]
+    for p in plans:
+        if p["done"] is None:
+            p["note"] = "no checkboxes: tasks listed as headings, completion tracked elsewhere"
+    return plans
+
+
+def plan_delta(old, new):
+    o = {p["path"]: p for p in old or []}
+    out = []
+    for p in new:
+        q = o.get(p["path"])
+        if not q:
+            out.append(f"{p['path']}: new plan {p['done']}/{p['total']}")
+        elif (q["done"], q["total"]) != (p["done"], p["total"]):
+            out.append(f"{p['path']}: {q['done']}/{q['total']} -> {p['done']}/{p['total']}")
+    return out
+
+
 def collect_github(repo_arg, warnings):
     if not shutil.which("gh"):
         warnings.append("gh not installed: issues/PRs/CI skipped")
@@ -418,6 +529,7 @@ def collect(repo, d, no_gh):
         facts["github"] = collect_github(gh_repo, warnings)
     fp = g.pop("_worktree_fp")
     tags = tag_names(repo)
+    facts["plans"] = collect_plans(repo)
     if incremental:
         hits, unmapped = touched_parts(prev_map, g["changed_files"])
         old_fp = baseline.get("worktree_fp")
@@ -435,9 +547,12 @@ def collect(repo, d, no_gh):
                                               if isinstance(p, dict) and p.get("id") not in hits]}
         if facts.get("github") and baseline.get("github"):
             facts["delta"]["github"] = github_delta(baseline["github"], facts["github"])
+        if "plans" in baseline:
+            facts["delta"]["plans"] = plan_delta(baseline["plans"], facts["plans"])
     # the baseline the *next* run compares against; promoted to baseline.json when this map is rendered
     dump_json(os.path.join(d, "pending_baseline.json"),
-              {"refs": ref_shas(repo), "tags": tags, "worktree_fp": fp, "github": facts.get("github")})
+              {"refs": ref_shas(repo), "tags": tags, "worktree_fp": fp, "github": facts.get("github"),
+               "plans": [{k: p[k] for k in ("path", "done", "total")} for p in facts["plans"]]})
     facts["warnings"] = warnings
     dump_json(os.path.join(d, "facts.json"), facts)
     state["last_collect"] = facts["collected_at"]
@@ -455,6 +570,11 @@ def collect(repo, d, no_gh):
               + (f"; new tags: {', '.join(dl['new_tags'])}" if dl["new_tags"] else ""))
         if "github" in dl:
             print(f"github: {json.dumps(dl['github'], ensure_ascii=False)[:400]}")
+        if dl.get("plans"):
+            print("plans: " + "; ".join(dl["plans"])[:400])
+    if facts["plans"]:
+        print("plan files: " + ", ".join(f"{p['path']} {'?' if p['done'] is None else p['done']}/{p['total']}"
+                                         for p in facts["plans"][:8]) + (" …" if len(facts["plans"]) > 8 else ""))
     for w in warnings:
         print(f"warning: {w}")
     print(f"facts: {os.path.join(d, 'facts.json')}")
@@ -565,9 +685,14 @@ def validate(m):
         if r.get("part") is not None and not (isinstance(r.get("part"), str) and r["part"] in ids):
             errs.append(f"remaining[{i}].part: unknown part id")
 
+    opt(m, "headline", "", str)
     if isinstance(m.get("next_step"), dict):
-        need(m["next_step"], "title", "next_step")
-        opt(m["next_step"], "why", "next_step", str)
+        ns = m["next_step"]
+        need(ns, "title", "next_step")
+        for k in ("why", "action", "unblocks"):
+            opt(ns, k, "next_step", str)
+        if ns.get("owner") is not None and ns.get("owner") not in OWNERS:
+            errs.append(f"next_step.owner: one of {OWNERS}")
     else:
         errs.append("next_step: required {title, why}")
     dec_opts = {}
@@ -652,6 +777,82 @@ def validate(m):
     return errs
 
 
+def main_path(m):
+    """Chain nodes on the path the page draws by default (fork nodes of non-default options removed)."""
+    nodes = (m.get("chain") or {}).get("nodes") or []
+    q = fork_decision(m)
+    return nodes_for(nodes, q["id"], q["options"].index(q["default"])) if q else nodes
+
+
+def lint(m):
+    """Spec checks that keep maps consistent across agents. Warnings only; run after validate passes."""
+    w = []
+    parts = m.get("parts") or []
+    # bottleneck = the earliest node on the main path that is not done yet
+    path = main_path(m)
+    bns = [n for n in (m.get("chain") or {}).get("nodes") or [] if n.get("bottleneck")]
+    if len(bns) > 1:
+        w.append("chain: more than one bottleneck; mark only the earliest node that is not done")
+    first_open = next((n for n in path if n.get("status") != "done"), None)
+    if bns and first_open and bns[0] is not first_open and bns[0] in path:
+        w.append(f"chain: bottleneck is '{bns[0]['label']}' but the earliest open node on the path is "
+                 f"'{first_open['label']}'; nodes run left to right in the order they must finish")
+    if path and not bns and first_open:
+        w.append(f"chain: no bottleneck marked; it is usually '{first_open['label']}'")
+    order = {n["id"]: i for i, n in enumerate(path)}
+    for e in (m.get("chain") or {}).get("edges") or []:
+        a, b = order.get(e.get("from")), order.get(e.get("to"))
+        if a is not None and b is not None and a > b:
+            w.append(f"chain.edges {e['from']}->{e['to']}: points backwards; from must finish before to")
+    # parts: one owner per path, evidence in a checkable form, done means done
+    owners = []
+    for p in parts:
+        for x in p.get("paths") or []:
+            x = x.strip()
+            while x.startswith("./"):
+                x = x[2:]
+            owners.append((x.rstrip("/*"), p["id"]))
+    for x, a in owners:
+        for y, b in owners:
+            if a < b and x and y and (x == y or x.startswith(y + "/") or y.startswith(x + "/")):
+                w.append(f"parts {a} and {b}: paths overlap ({x} / {y}); give each file one owner")
+    for p in parts:
+        for ev in p.get("evidence") or []:
+            if not EVIDENCE_RE.match(ev.strip()):
+                w.append(f"parts[{p['id']}].evidence '{ev[:40]}': use #123, a short sha, `path`, run:ID or a URL")
+        pr = p.get("progress") or {}
+        if pr and pr.get("done") == pr.get("total") and p.get("status") not in ("done",):
+            w.append(f"parts[{p['id']}]: progress is {pr['done']}/{pr['total']} but status is {p.get('status')}; "
+                     "say in the summary what is still open (e.g. unverified, not merged)")
+        if p.get("status") == "done" and pr and pr.get("done", 0) < pr.get("total", 0):
+            w.append(f"parts[{p['id']}]: done but progress {pr['done']}/{pr['total']}")
+        if len(p.get("summary") or "") > BUDGET["summary"]:
+            w.append(f"parts[{p['id']}].summary: over {BUDGET['summary']} chars; move detail to panels")
+    for s in m.get("milestones") or []:
+        if s.get("proposed") and s.get("status") == "done":
+            w.append(f"milestones '{s['name']}': proposed applies to current/future milestones, not history")
+    # text budget for a 30-second morning read
+    if len(m.get("headline") or "") > BUDGET["headline"]:
+        w.append(f"headline: over {BUDGET['headline']} chars")
+    if not m.get("headline"):
+        w.append("headline: missing; one sentence on what changed and what needs the user")
+    ns = m.get("next_step") or {}
+    if len(ns.get("title") or "") > BUDGET["next_step"]:
+        w.append(f"next_step.title: over {BUDGET['next_step']} chars")
+    if not ns.get("owner"):
+        w.append("next_step.owner: say who does it (user or agent)")
+    for n in (m.get("chain") or {}).get("nodes") or []:
+        if len(n.get("sub") or "") > BUDGET["sub"]:
+            w.append(f"chain node '{n['label']}'.sub: over {BUDGET['sub']} chars")
+    unc = m.get("uncertain") or []
+    if len(unc) > BUDGET["uncertain_items"]:
+        w.append(f"uncertain: {len(unc)} items; keep the {BUDGET['uncertain_items']} that change a decision")
+    for u in unc:
+        if len(u) > BUDGET["uncertain"]:
+            w.append(f"uncertain '{u[:30]}…': over {BUDGET['uncertain']} chars")
+    return w
+
+
 def cmd_validate(a):
     repo = repo_root(a.repo)
     d = out_dir(repo, a.out)
@@ -663,6 +864,8 @@ def cmd_validate(a):
         print(f"error: {e}")
     if errs:
         sys.exit(1)
+    for x in lint(m):
+        print(f"warning: {x}")
     print("map.json ok")
 
 
@@ -736,7 +939,9 @@ TEXT = {
            "unmapped": "不在地图上", "accept": "接受默认", "override": "改口", "copied": "已复制",
            "expired": "已过期", "default_taken": "默认已生效", "see_path": "看另一条路", "hide_path": "收回这条路",
            "done_quiet": "已完成", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
-           "open_link": "在 GitHub 打开", "waits": "等你确认", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
+           "open_link": "在 GitHub 打开", "waits": "等你确认",
+           "better": "变好", "worse": "变坏", "needs_you": "等你", "owner_user": "你来做", "owner_agent": "agent 来做",
+           "unblocks": "做完解锁", "how": "怎么做", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
            "ms_done": "Done", "ms_current": "In progress", "ms_future": "Later",
            "title": "Project map", "updated": "Updated", "commits_since": "commits since last", "commits_recent": "recent commits",
@@ -752,7 +957,9 @@ TEXT = {
            "unmapped": "Not on the map", "accept": "Accept default", "override": "Override", "copied": "Copied",
            "expired": "Expired", "default_taken": "Default stands", "see_path": "Show the other path",
            "hide_path": "Hide the other path", "done_quiet": "Done", "scrub_then": "Then", "scrub_now": "Now",
-           "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you", "fork_if": "If you override",
+           "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you",
+           "better": "better", "worse": "worse", "needs_you": "need you", "owner_user": "You", "owner_agent": "Agent",
+           "unblocks": "Unblocks", "how": "How", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
            "copy_hint": "Copy, then paste back to the agent", "copy": "Copy"},
 }
 
@@ -1004,7 +1211,6 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     P = m["project"]
     parts = m["parts"]
     by_id, by_name = part_indexes(parts)
-    n_done = sum(p["status"] == "done" for p in parts)
     n_stuck = sum(p["status"] == "stuck" for p in parts)
     stray = unmapped_files(facts, parts)
     fork = fork_decision(m)
@@ -1017,7 +1223,6 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         wt = g.get("worktree", {})
         if wt.get("modified") or wt.get("untracked"):
             meta.append(f'{L["worktree"]} <b>{wt.get("modified", 0) + wt.get("untracked", 0)}</b>')
-    meta.append(f'<b>{n_done}/{len(parts)}</b> {L["of_done"]}')
     if n_stuck:
         meta.append(f'<span class="stuck-dot"></span><b class="c-stuck">{n_stuck} {L["stuck"]}</b>')
     repo_link = (f' <a class="slug" href="{html.escape(web, quote=True)}">{html.escape(slug)}</a>'
@@ -1025,6 +1230,30 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     head = (f'<header><h1>{r(P["name"])}<span class="sub">{L["title"]}</span></h1>'
             f'<p class="summary">{r(P.get("summary", ""))}{repo_link}</p>'
             f'<p class="meta">{" · ".join(meta)}</p></header>')
+
+    # morning headline: one sentence, then what got better / worse / needs the user
+    better = sum(1 for k, _ in change_lines if k == "done")
+    worse = sum(1 for k, _ in change_lines if k == "stuck")
+    waiting = sum(1 for q in m.get("decisions") or [] if isinstance(q, dict))
+    bn = next((n.get("label") for n in (m.get("chain") or {}).get("nodes") or [] if n.get("bottleneck")), None)
+    chips = []
+    if prev_time:
+        chips.append(f'<span class="hl-since">{L["since_label"]} {fmt_time(prev_time)}</span>')
+    if better:
+        chips.append(f'<span class="hl hl-better"><b>{better}</b> {L["better"]}</span>')
+    if worse:
+        chips.append(f'<span class="hl hl-worse"><b>{worse}</b> {L["worse"]}</span>')
+    if waiting:
+        chips.append(f'<span class="hl hl-you"><b>{waiting}</b> {L["needs_you"]}</span>')
+    if bn:
+        chips.append(f'<span class="hl hl-bn">{L["bottleneck"]} · {r(bn)}</span>')
+    if prev_time and not change_lines:
+        chips.append(f'<span class="hl">{L["nothing_new"]}</span>')
+    headline = m.get("headline")
+    hero = ""
+    if headline or chips:
+        hero = (f'<section class="hero">{f"<p class=hl-text>{r(headline)}</p>" if headline else ""}'
+                f'<div class="hl-row">{"".join(chips)}</div></section>')
 
     # milestone track
     track = ""
@@ -1151,13 +1380,17 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
             for p in parts if p["status"] == "done" and p["id"] not in marks)
         done_html = (f'<details class="done-row"><summary>{html.escape(L["done_quiet"])} · {len(quiet)}</summary>'
                      f'<div class="done-names">{names}</div><div class="parts">{"".join(quiet)}</div></details>')
-    parts_html = (f'<section><div class="sh"><h2>{L["parts"]}</h2><span><b>{n_done}</b> / {len(parts)} {L["of_done"]}</span></div>'
+    parts_html = (f'<section><div class="sh"><h2>{L["parts"]}</h2></div>'
                   f'{filters}{stray_html}<div class="parts">{"".join(active)}</div>{done_html}</section>')
 
     # sidebar
     ns = m["next_step"]
-    side = [f'<section class="card next"><h2>{L["next_step"]}</h2><p class="nt">{r(ns["title"])}</p>'
-            f'<p>{r(ns.get("why", ""))}</p></section>']
+    owner = ns.get("owner") if ns.get("owner") in OWNERS else None
+    who = f'<span class="owner o-{owner}">{L["owner_" + owner]}</span>' if owner else ""
+    how = (f'<p class="how"><span>{L["how"]}</span> {r(ns["action"])}</p>' if ns.get("action") else "")
+    unl = (f'<p class="unl"><span>{L["unblocks"]}</span> {r(ns["unblocks"])}</p>' if ns.get("unblocks") else "")
+    side = [f'<section class="card next"><h2>{L["next_step"]}{who}</h2><p class="nt">{r(ns["title"])}</p>'
+            f'<p>{r(ns.get("why") or "")}</p>{how}{unl}</section>']
     if m.get("decisions"):
         qs = []
         for i, q in enumerate(m["decisions"]):
@@ -1208,7 +1441,12 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         cl = "".join(rows)
     else:
         cl = f'<li class="muted">{L["first_run"]}</li>'
-    commits = ((facts or {}).get("git") or {}).get("commits") or []
+    seen_subjects, commits = set(), []
+    for c in ((facts or {}).get("git") or {}).get("commits") or []:
+        if c.get("subject") in seen_subjects:
+            continue
+        seen_subjects.add(c.get("subject"))
+        commits.append(c)
     commits = commits[:6]
     cm = "".join(f'<li><span class="t">{fmt_time(c["date"])}</span> {r(c["sha"][:7])} {r(c["subject"])}</li>'
                  for c in commits)
@@ -1264,7 +1502,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         "labels": {"expired": L["expired"], "open": L["open_link"]},
     }
     data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
-    body = (f'{pin}{head}{scrub}{track}{chain}<div class="grid"><div class="main">{parts_html}</div>'
+    body = (f'{pin}{head}{hero}{scrub}{track}{chain}<div class="grid"><div class="main">{parts_html}</div>'
             f'<aside>{"".join(side)}</aside></div>{details}<footer class="foot">{footer}</footer>'
             f'<div id="peek" hidden role="dialog"><p id="peek-text"></p>'
             f'<a id="peek-link" target="_blank" rel="noopener" hidden></a></div>')
@@ -1366,6 +1604,14 @@ h3{{margin:0}}
 .bar{{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;margin-top:3px}} .bar i{{display:block;height:100%;background:var(--prog);border-radius:3px}}
 .pt-done .bar i{{background:var(--done)}}
 aside .card{{padding:16px 18px}}
+.hero{{margin:-6px 0 18px}} .hl-text{{font-size:19px;line-height:1.45;margin:0 0 10px;font-weight:550;max-width:70ch}}
+.hl-row{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px}}
+.hl{{border:1px solid var(--line);border-radius:999px;padding:2px 10px;background:var(--card)}} .hl b{{font-size:14px}}
+.hl-better b{{color:var(--done)}} .hl-worse b{{color:var(--stuck)}} .hl-you{{border-color:color-mix(in srgb,var(--stuck) 45%,var(--line))}}
+.hl-you b{{color:var(--stuck)}} .hl-bn{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .hl-since{{color:var(--dim)}}
+.owner{{float:right;text-transform:none;letter-spacing:0;font-size:12px;padding:1px 8px;border-radius:6px;background:var(--card2)}}
+.o-user{{color:var(--stuck)}} .o-agent{{color:var(--accent)}}
+.next .how,.next .unl{{margin:8px 0 0;font-size:13px}} .next .how span,.next .unl span{{color:var(--dim);margin-right:6px}}
 .next{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .next .nt{{font-size:18px;font-weight:650;margin:0 0 6px;color:var(--accent)}}
 .next p{{margin:0;color:var(--mut);font-size:13px}}
 .decide{{border-color:color-mix(in srgb,var(--stuck) 35%,var(--line))}} .decide h2{{color:var(--stuck)}}
@@ -1776,6 +2022,8 @@ def render(repo, d):
         os.replace(pend, os.path.join(d, "baseline.json"))
     state.update({"last_map": snap, "last_render": now_iso(), "repo": repo})
     dump_json(os.path.join(d, "state.json"), state)
+    for x in lint(m):
+        print(f"warning: {x}")
     print(f"changes since last render: {len(lines)}" if prev else "first render (no previous map)")
     for _, t in lines:
         print(f"  - {t}")
