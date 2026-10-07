@@ -88,6 +88,14 @@ class Hooks(unittest.TestCase):
         self.draw_map()
         self.assertIn("Answer from", self.hook("UserPromptSubmit", {"prompt": "Where are we?"}))
 
+    def test_where_pattern_is_specific(self):
+        sys.path.insert(0, os.path.dirname(HOOK))
+        import yah_hook
+        for t in ("进度到哪了？", "现在做到哪了", "Where are we?", "项目进度怎么样", "画个项目地图", "what's left?"):
+            self.assertTrue(yah_hook.WHERE.search(t), t)
+        for t in ("三端验证进度是 1/3", "进度条颜色改一下", "把 progress bar 改成绿色", "这个函数还剩一个 bug"):
+            self.assertFalse(yah_hook.WHERE.search(t), t)
+
     def test_long_run_suggests_map_and_auto(self):
         text = self.hook("UserPromptSubmit", {"prompt": "keep working on this overnight, don't ask me"})
         self.assertIn("auto on", text)

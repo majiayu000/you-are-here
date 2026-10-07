@@ -27,8 +27,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.join(os.path.dirname(HERE), "skills", "you-are-here")
 sys.path.insert(0, os.path.join(SKILL_DIR, "scripts"))
 
-WHERE = re.compile(r"where are we|what'?s (left|done)|how far (along|are we)|project (map|status)|status of the project|"
-                   r"进度|到哪了|到哪儿了|还剩(什么|多少|哪些)|项目地图|画.{0,4}地图|做到哪", re.I)
+WHERE = re.compile(r"where are we\b|what'?s (left|done)\??\s*$|how far (along )?are we|project (map|status)\b|"
+                   r"status of the project|进度(到哪|怎么样|如何|怎样)|到哪(了|儿了|一步)|还剩(什么|多少|哪些)(没做|要做)?[？?]?\s*$|"
+                   r"项目地图|画.{0,4}地图|做到哪", re.I)
 LONG = re.compile(r"overnight|while i('| a)m (asleep|sleeping|away|out)|keep going until|for (the next )?(few |several )?hours|"
                   r"autonomous(ly)?|unattended|/goal\b|通宵|睡觉|一晚上|一整晚|长时间|自己(跑|干|做)|不用问我|我不在", re.I)
 MILESTONE = re.compile(r"\bgit\s+(commit|tag|merge|push)\b|\bgh\s+(pr\s+merge|release\s+create)\b")
