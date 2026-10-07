@@ -42,9 +42,11 @@ contains this SKILL.md. Python 3.8+ only, no dependencies. `gh` is optional (iss
 3. **Read.**
    - `initial` mode: read `facts.json`, the README and the doc hints it lists (roadmap, changelog,
      specs), and skim the source layout. Enough to name 4–8 parts — don't read every file.
-   - `incremental` mode: read the previous `map.json` and `facts.json → delta`. Re-examine only
-     `touched_parts`, `unmapped_files` and anything whose state lives on GitHub (PR checks, CI,
-     issues). Carry untouched parts over unchanged. This keeps updates cheap.
+   - `incremental` mode: read the previous `map.json` and `facts.json → delta`. It already lists
+     `touched_parts` (new commits and uncommitted edits mapped onto each part's `paths`),
+     `unmapped_files`, `worktree_changed`, and `github` (PRs opened/merged/changed, issues,
+     new CI runs since the last map). Re-examine only what the delta names, plus a chain node
+     whose state lives elsewhere. Carry everything else over unchanged; don't re-read the repo.
 4. **Write `map.json`** in the output dir, following `references/schema.md`. Required shape:
    milestones (one `current`), `remaining` for the current milestone, a `chain` whose node order is
    the main path left → right with the current bottleneck marked, parts with `paths` so the next

@@ -118,6 +118,46 @@ class PmapTest(unittest.TestCase):
         self.assertEqual(st["status"], "stale")
         self.assertEqual(st["new_tags"], ["v9"])
 
+    def test_worktree_and_chain_delta(self):
+        self.pmap("collect", "--no-gh")
+        self.write_map(MAP)
+        self.pmap("render")
+        put(os.path.join(self.repo, "src", "new.py"), "z = 3\n")   # uncommitted edit under part "core"
+        self.pmap("collect", "--no-gh")
+        dl = json.loads(read(os.path.join(self.out, "facts.json")))["delta"]
+        self.assertEqual(dl["worktree_changed"], ["src/new.py"])
+        self.assertEqual(dl["touched_parts"], {"core": 1})
+        m2 = json.loads(json.dumps(MAP))
+        m2["chain"]["nodes"][0]["bottleneck"] = False
+        m2["chain"]["nodes"][1].update(bottleneck=True, status="stuck")
+        m2["remaining"] = m2["remaining"][1:]
+        self.write_map(m2)
+        out = self.pmap("render").stdout
+        self.assertIn("parser → release", out)        # bottleneck moved
+        self.assertIn("release: 未开始 → 卡住", out)   # chain node status
+        self.assertIn("parser ✓", out)                 # remaining item done
+        self.pmap("collect", "--no-gh")                # baseline promoted: no worktree change now
+        dl = json.loads(read(os.path.join(self.out, "facts.json")))["delta"]
+        self.assertEqual(dl["worktree_changed"], [])
+
+    def test_github_delta(self):
+        sys.path.insert(0, os.path.dirname(PMAP))
+        import pmap
+        old = {"prs": [{"number": 1, "title": "a", "checks": {"pass": 1, "fail": 0, "pending": 2}},
+                       {"number": 2, "title": "b", "checks": {}}],
+               "issues": [{"number": 5, "title": "x"}], "default_branch_runs": [{"id": 9}]}
+        new = {"prs": [{"number": 1, "title": "a", "checks": {"pass": 3, "fail": 0, "pending": 0}},
+                       {"number": 3, "title": "c", "checks": {}}],
+               "issues": [{"number": 6, "title": "y"}],
+               "default_branch_runs": [{"id": 10, "workflow": "CI", "sha": "abc1234", "conclusion": "success", "status": "completed"}, {"id": 9}]}
+        d = pmap.github_delta(old, new)
+        self.assertEqual(d["prs_opened"], ["#3 c"])
+        self.assertEqual(d["prs_gone"], ["#2 b (merged or closed)"])
+        self.assertIn("checks", d["prs_changed"][0])
+        self.assertEqual(d["issues_closed"], ["#5"])
+        self.assertEqual(d["new_ci_runs"], ["CI abc1234: success"])
+        self.assertEqual(pmap.github_delta(new, new), "no changes")
+
     def test_validation_errors(self):
         self.pmap("collect", "--no-gh")
         bad = json.loads(json.dumps(MAP))

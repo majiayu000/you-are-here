@@ -26,8 +26,12 @@ Grok's shell tool (Grok runs Claude hooks by default), its shell commands are de
 | the agent | decides the parts, statuses, milestones and blocker chain, and writes `map.json` ([schema](references/schema.md)) |
 
 The fixed page structure keeps maps consistent across agents and runs. Incremental mode keeps
-updates cheap: `collect` maps changed files onto each part's `paths`, so the agent only
-re-checks the parts that were touched.
+updates cheap. `collect` compares against the last rendered map and reports a delta:
+- new commits and uncommitted edits, mapped onto each part's `paths`;
+- PRs opened, merged or changed, issues, and new CI runs.
+
+The agent only re-checks what the delta names. `render` lists what changed: part status and
+progress, milestones, the bottleneck, chain nodes, remaining items and the next step.
 
 ## Install
 
@@ -41,7 +45,7 @@ python3 install.py --uninstall       # remove everything it installed
 | Part | Claude Code | Codex | Grok |
 |------|-------------|-------|------|
 | skill (symlink) | `~/.claude/skills/you-are-here` | `~/.codex/skills/you-are-here` | `~/.agents/skills/you-are-here` |
-| background subagent | `~/.claude/agents/you-are-here.md` | `~/.codex/agents/you-are-here.toml` (effort medium) | `~/.grok/agents/you-are-here.md` |
+| background subagent | `~/.claude/agents/you-are-here.md` (always background, effort medium, skill preloaded) | `~/.codex/agents/you-are-here.toml` (effort medium) | `~/.grok/agents/you-are-here.md` |
 | automation rule | `~/.claude/rules/you-are-here.md` | marked block in `~/.codex/AGENTS.md` (backed up first) | reads `~/.claude/rules` via Claude compat |
 
 The installer only touches its own files: symlinks to this folder, files carrying its marker, and

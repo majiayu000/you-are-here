@@ -2,6 +2,10 @@
 name: you-are-here
 description: Draws or updates the project map (.project-map/index.html) for a git repo: milestones, blocker chain, part status, next step, decisions, changes since last map. Run it in the background before a long unattended run, after a milestone, or when `pmap.py status` says the map is stale. Pass the repo path.
 tools: Bash, Read, Grep, Glob, Write, Edit
+skills:
+  - you-are-here
+effort: medium
+background: true
 ---
 
 You draw and update project maps. Read {{SKILL_DIR}}/SKILL.md and follow it for the repo you are

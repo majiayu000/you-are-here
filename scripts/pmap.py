@@ -133,6 +133,15 @@ def collect_git(repo, state):
         "untracked": sum(1 for l in lines if l.startswith("??")),
         "paths": [l[3:] for l in lines[:60]],
     }
+    fp = {}
+    for l in lines[:500]:
+        path = l[3:].split(" -> ")[-1].strip('"')
+        try:
+            st = os.stat(os.path.join(repo, path))
+            fp[path] = [int(st.st_mtime), st.st_size]
+        except OSError:
+            fp[path] = None  # deleted
+    f["_worktree_fp"] = fp
     ok, br = git(repo, "for-each-ref", "--sort=-committerdate", "--count=15",
                  "--format=%(refname:short)\x03%(committerdate:iso-strict)\x03%(upstream:track)", "refs/heads")
     f["branches"] = [dict(zip(("name", "date", "track"), l.split("\x03"))) for l in br.splitlines()] if ok and br else []
@@ -200,6 +209,30 @@ def collect_github(slug, warnings):
     return g
 
 
+def github_delta(old, new):
+    """What changed on GitHub since the last rendered map: PRs, issues, default-branch CI."""
+    out = {}
+    op = {p["number"]: p for p in old.get("prs") or []}
+    np_ = {p["number"]: p for p in new.get("prs") or []}
+    out["prs_opened"] = [f"#{n} {np_[n]['title']}" for n in sorted(np_.keys() - op.keys())]
+    out["prs_gone"] = [f"#{n} {op[n]['title']} (merged or closed)" for n in sorted(op.keys() - np_.keys())]
+    changed = []
+    for n in sorted(np_.keys() & op.keys()):
+        a, b = op[n], np_[n]
+        bits = [f"{k}: {a.get(k)} -> {b.get(k)}" for k in ("checks", "review", "merge_state", "draft") if a.get(k) != b.get(k)]
+        if bits:
+            changed.append(f"#{n}: " + "; ".join(bits))
+    out["prs_changed"] = changed
+    oi = {i["number"] for i in old.get("issues") or []}
+    ni = {i["number"]: i for i in new.get("issues") or []}
+    out["issues_opened"] = [f"#{n} {ni[n]['title']}" for n in sorted(ni.keys() - oi)]
+    out["issues_closed"] = [f"#{n}" for n in sorted(oi - ni.keys())]
+    seen = {r["id"] for r in old.get("default_branch_runs") or []}
+    out["new_ci_runs"] = [f"{r['workflow']} {r['sha']}: {r['conclusion'] or r['status']}"
+                          for r in new.get("default_branch_runs") or [] if r["id"] not in seen]
+    return {k: v for k, v in out.items() if v} or "no changes"
+
+
 def touched_parts(prev_map, changed_files):
     """Map changed files onto parts[].paths of the previous map, so the agent can skip untouched parts."""
     hits = {}
@@ -230,10 +263,32 @@ def cmd_collect(a):
         facts["github"] = collect_github(slug, warnings)
     elif not slug:
         warnings.append("no GitHub origin: issues/PRs/CI skipped")
+    fp = facts["git"].pop("_worktree_fp")
+    baseline = load_json(os.path.join(d, "baseline.json"), {}) or {}
     if facts["mode"] == "incremental":
+        # --since is inclusive at second precision: drop commits the last map already covered
+        seen = set(baseline.get("commits") or [])
+        g = facts["git"]
+        g["commits"] = [c for c in g["commits"] if c["sha"] not in seen]
+        g["changed_files"] = sorted({p for c in g["commits"] for p in c["files"]})
         hits, unmapped = touched_parts(prev_map, facts["git"]["changed_files"])
+        old_fp = baseline.get("worktree_fp")
+        if old_fp is not None:
+            wt = sorted(p for p in fp.keys() | old_fp.keys() if fp.get(p) != old_fp.get(p))
+            for f_ in wt:
+                for pid in [p["id"] for p in prev_map.get("parts", [])
+                            if any(f_ == x.rstrip("/") or f_.startswith(x.rstrip("*").rstrip("/") + "/") for x in p.get("paths", []))]:
+                    hits[pid] = hits.get(pid, 0) + 1
+        else:
+            wt = None
         facts["delta"] = {"touched_parts": hits, "unmapped_files": unmapped[:80],
+                          "worktree_changed": wt[:80] if wt is not None else "unknown (no baseline yet)",
                           "untouched_parts": [p["id"] for p in prev_map.get("parts", []) if p["id"] not in hits]}
+        if facts.get("github") and baseline.get("github"):
+            facts["delta"]["github"] = github_delta(baseline["github"], facts["github"])
+    dump_json(os.path.join(d, "pending_baseline.json"),
+              {"worktree_fp": fp, "github": facts.get("github"),
+               "commits": [c["sha"] for c in facts["git"]["commits"]][:500]})
     facts["warnings"] = warnings
     dump_json(os.path.join(d, "facts.json"), facts)
     state["last_collect"] = facts["collected_at"]
@@ -245,8 +300,12 @@ def cmd_collect(a):
     print(f"commits: {len(g['commits'])}, changed files: {len(g['changed_files'])}, "
           f"worktree: {g['worktree']['modified']} modified / {g['worktree']['untracked']} untracked")
     if "delta" in facts:
-        print(f"touched parts: {facts['delta']['touched_parts'] or 'none'}; "
-              f"unmapped files: {len(facts['delta']['unmapped_files'])}")
+        dl = facts["delta"]
+        wt = dl["worktree_changed"]
+        print(f"touched parts: {dl['touched_parts'] or 'none'}; unmapped files: {len(dl['unmapped_files'])}; "
+              f"worktree changed: {len(wt) if isinstance(wt, list) else wt}")
+        if "github" in dl:
+            print(f"github: {json.dumps(dl['github'], ensure_ascii=False)[:400]}")
     for w in warnings:
         print(f"warning: {w}")
     print(f"facts: {os.path.join(d, 'facts.json')}")
@@ -371,6 +430,22 @@ def diff_maps(prev, cur):
     for s in cur.get("milestones", []):
         if s["name"] in om and om[s["name"]] != s.get("status"):
             lines.append(("done", f"{L['milestone']} {s['name']}: {L['ms_' + om[s['name']]]} → {L['ms_' + s['status']]}"))
+    def bottleneck(m):
+        return next((n["label"] for n in (m.get("chain") or {}).get("nodes", []) if n.get("bottleneck")), None)
+    ob, nb = bottleneck(prev), bottleneck(cur)
+    if ob != nb and nb:
+        lines.append(("stuck", f"{L['bottleneck']}: {ob or '—'} → {nb}"))
+    onodes = {n["id"]: n for n in (prev.get("chain") or {}).get("nodes", [])}
+    for n in (cur.get("chain") or {}).get("nodes", []):
+        o = onodes.get(n["id"])
+        if o and o.get("status") != n.get("status") and n.get("status") in PART_STATUS and o.get("status") in PART_STATUS:
+            lines.append((n["status"], f"{n['label']}: {L[o['status']]} → {L[n['status']]}"))
+    orem = {r["label"]: r.get("status") for r in prev.get("remaining", [])}
+    nrem = {r["label"]: r.get("status") for r in cur.get("remaining", [])}
+    for label in orem.keys() - nrem.keys():
+        lines.append(("done", f"{L['remaining']}: {label} ✓"))
+    for label in nrem.keys() - orem.keys():
+        lines.append(("new", f"{L['remaining']}: + {label}"))
     if (prev.get("next_step") or {}).get("title") != (cur.get("next_step") or {}).get("title"):
         lines.append(("in_progress", f"{L['next_step']}: {cur['next_step']['title']}"))
     return marks, lines
@@ -389,7 +464,7 @@ TEXT = {
            "default": "默认", "by": "截止", "changes": "自上次以来的变化", "first_run": "首次生成，暂无对比",
            "recent_commits": "最近提交", "uncertain": "不确定 / 推断", "details": "明细", "new": "新增",
            "removed": "已移除", "milestone": "里程碑", "waiting": "等待", "worktree": "工作区未提交",
-           "sources": "来源", "warnings": "收集警告", "changed": "有变化"},
+           "sources": "来源", "warnings": "收集警告", "changed": "有变化", "remaining": "剩余项"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
            "ms_done": "Done", "ms_current": "In progress", "ms_future": "Later",
            "title": "Project map", "updated": "Updated", "commits_since": "commits since last", "commits_recent": "recent commits",
@@ -400,7 +475,7 @@ TEXT = {
            "default": "Default", "by": "by", "changes": "Changed since last update", "first_run": "First map, nothing to compare",
            "recent_commits": "Recent commits", "uncertain": "Uncertain / inferred", "details": "Details", "new": "New",
            "removed": "Removed", "milestone": "Milestone", "waiting": "Waiting on", "worktree": "Uncommitted",
-           "sources": "Sources", "warnings": "Collector warnings", "changed": "Changed"},
+           "sources": "Sources", "warnings": "Collector warnings", "changed": "Changed", "remaining": "Remaining"},
 }
 
 
@@ -756,6 +831,9 @@ def cmd_render(a):
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     snap = os.path.join(d, "history", f"{stamp}.json")
     dump_json(snap, m)
+    pend = os.path.join(d, "pending_baseline.json")
+    if os.path.exists(pend):
+        os.replace(pend, os.path.join(d, "baseline.json"))
     state.update({"last_map": snap, "last_render": now_iso(), "repo": repo})
     dump_json(os.path.join(d, "state.json"), state)
     print(f"changes since last render: {len(lines)}" if prev else "first render (no previous map)")
@@ -776,7 +854,8 @@ def cmd_status(a):
     else:
         refs = ["HEAD"] + [r for r in ("@{u}", "origin/HEAD") if git(repo, "rev-parse", "--verify", "-q", r)[0]]
         ok, out = git(repo, "log", f"--since={since}", "--format=%h", *refs)
-        commits = len(out.split()) if ok and out else 0
+        seen = {c[:7] for c in (load_json(os.path.join(d, "baseline.json"), {}) or {}).get("commits") or []}
+        commits = len([h for h in out.split() if h[:7] not in seen]) if ok and out else 0
         ok, out = git(repo, "for-each-ref", "--format=%(refname:short)\x03%(creatordate:iso-strict)", "refs/tags")
         new_tags = []
         if ok and out:
