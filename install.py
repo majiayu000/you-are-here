@@ -179,9 +179,9 @@ def main():
         return
 
     if a.codex_agent and not (a.all or a.skills or a.agents or a.rules):
-        pl.link(p(".codex", "skills", NAME))
-        dest, src, skill_dir, kind = agent_files()[1]
-        pl.write(dest, stamp(tmpl(src, skill_dir), kind))
+        # the plugin already provides the skill; the agent just reads it from this checkout
+        dest, src, _, kind = agent_files()[1]
+        pl.write(dest, stamp(tmpl(src, SRC), kind))
         return
     picked = a.skills or a.agents or a.rules
     skills, agents, rules = (True, True, True) if a.all else (a.skills or not picked, a.agents, a.rules)

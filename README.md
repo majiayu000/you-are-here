@@ -37,8 +37,8 @@ codex plugin marketplace add majiayu000/you-are-here
 codex plugin add you-are-here@you-are-here
 ```
 
-Then open `/hooks` in Codex once and trust the you-are-here hooks. Codex plugins can't ship
-subagents, so add the background subagent from a checkout:
+Then open `/hooks` in Codex once and trust the you-are-here hooks (until you do, Codex skips them).
+Codex plugins can't ship subagents, so add the background subagent from a checkout:
 
 ```sh
 git clone https://github.com/majiayu000/you-are-here && python3 you-are-here/install.py --codex-agent
@@ -86,6 +86,10 @@ python3 <plugin>/skills/you-are-here/scripts/pmap.py auto on .   # or ask the ag
 
 "Stale" is decided by git alone, with no network and no model: new commits, a new tag, or edited
 files since the last map.
+
+Grok passes hook output to the model only after tool calls and at the end of a turn, so in Grok the
+map summary is not handed over at session start and "where are we?" goes through the skill. The
+milestone checks and background refreshes work the same way as in the other two agents.
 
 A background refresh runs the same agent you are using, headless and detached: `claude -p`,
 `codex exec` or `grok -p`. It is limited to one at a time per repo and to one every 20 minutes
