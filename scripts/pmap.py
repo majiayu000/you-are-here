@@ -562,6 +562,40 @@ def validate(m):
         opt(r, "note", f"remaining[{i}]", str)
         if r.get("status") not in PART_STATUS:
             errs.append(f"remaining[{i}].status: one of {PART_STATUS}")
+        if r.get("part") is not None and not (isinstance(r.get("part"), str) and r["part"] in ids):
+            errs.append(f"remaining[{i}].part: unknown part id")
+
+    if isinstance(m.get("next_step"), dict):
+        need(m["next_step"], "title", "next_step")
+        opt(m["next_step"], "why", "next_step", str)
+    else:
+        errs.append("next_step: required {title, why}")
+    dec_opts = {}
+    for i, q in dicts(m, "decisions", ""):
+        w = f"decisions[{i}]"
+        need(q, "question", w)
+        need(q, "default", w)
+        opt(q, "deadline", w, str)
+        opt(q, "proposed", w, bool)
+        opt(q, "reversible", w, bool)
+        opts = q.get("options")
+        if opts is not None:
+            if not isinstance(opts, list) or not opts or not all(is_str(x) for x in opts):
+                errs.append(f"{w}.options: non-empty list of strings")
+                opts = None
+            elif q.get("default") not in opts:
+                errs.append(f"{w}.default: must be one of options")
+        # a default that goes ahead on its own is only allowed for reversible, local choices
+        if q.get("deadline") and q.get("reversible") is not True:
+            errs.append(f"{w}.deadline: only for reversible choices; set reversible: true, or drop the "
+                        f"deadline so it waits for the user (push, publish, merge, delete, spend...)")
+        if q.get("id") is not None:
+            if not is_str(q.get("id")):
+                errs.append(f"{w}.id: must be a non-empty string")
+            elif q["id"] in dec_opts:
+                errs.append(f"{w}.id: duplicate {q['id']}")
+            else:
+                dec_opts[q["id"]] = opts or []
 
     if opt(m, "chain", "", dict):
         ch = m.get("chain") or {}
@@ -575,6 +609,19 @@ def validate(m):
             opt(n, "bottleneck", w, bool)
             if n.get("status") is not None and n.get("status") not in PART_STATUS:
                 errs.append(f"{w}.status: one of {PART_STATUS}")
+            if n.get("part") is not None and not (isinstance(n.get("part"), str) and n["part"] in ids):
+                errs.append(f"{w}.part: unknown part id")
+            iff = n.get("if")
+            if iff is not None:
+                if not (isinstance(iff, dict) and is_str(iff.get("decision"))
+                        and type(iff.get("option")) is int):
+                    errs.append(f"{w}.if: {{decision, option: int}}")
+                elif iff["decision"] not in dec_opts:
+                    errs.append(f"{w}.if.decision: unknown decision id")
+                elif not dec_opts[iff["decision"]]:
+                    errs.append(f"{w}.if.decision: that decision needs options")
+                elif not 0 <= iff["option"] < len(dec_opts[iff["decision"]]):
+                    errs.append(f"{w}.if.option: out of range")
             if isinstance(n.get("id"), str):
                 nids.add(n["id"])
         for i, e in dicts(ch, "edges", "chain."):
@@ -587,17 +634,6 @@ def validate(m):
             if e.get("kind") == "evidence" and not is_str(e.get("why")):
                 errs.append(f"{w}.why: required for evidence edges")
 
-    if isinstance(m.get("next_step"), dict):
-        need(m["next_step"], "title", "next_step")
-        opt(m["next_step"], "why", "next_step", str)
-    else:
-        errs.append("next_step: required {title, why}")
-    for i, q in dicts(m, "decisions", ""):
-        w = f"decisions[{i}]"
-        need(q, "question", w)
-        need(q, "default", w)
-        opt(q, "deadline", w, str)
-        opt(q, "proposed", w, bool)
     for i, p in dicts(m, "panels", ""):
         w = f"panels[{i}]"
         need(p, "title", w)
@@ -695,7 +731,12 @@ TEXT = {
            "default": "默认", "by": "截止", "changes": "自上次以来的变化", "first_run": "首次生成，暂无对比",
            "recent_commits": "最近提交", "uncertain": "不确定 / 推断", "details": "明细", "new": "新增",
            "removed": "已移除", "milestone": "里程碑", "waiting": "等待", "worktree": "工作区未提交",
-           "sources": "来源", "warnings": "收集警告", "changed": "有变化", "remaining": "剩余项"},
+           "sources": "来源", "warnings": "收集警告", "changed": "有变化", "remaining": "剩余项",
+           "filter_all": "全部", "filter_moving": "在动", "filter_changed": "这次变了", "filter_inferred": "推断",
+           "unmapped": "不在地图上", "accept": "接受默认", "override": "改口", "copied": "已复制",
+           "expired": "已过期", "default_taken": "默认已生效", "see_path": "看另一条路", "hide_path": "收回这条路",
+           "done_quiet": "已完成", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
+           "open_link": "在 GitHub 打开", "waits": "等你确认", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
            "ms_done": "Done", "ms_current": "In progress", "ms_future": "Later",
            "title": "Project map", "updated": "Updated", "commits_since": "commits since last", "commits_recent": "recent commits",
@@ -706,7 +747,13 @@ TEXT = {
            "default": "Default", "by": "by", "changes": "Changed since last update", "first_run": "First map, nothing to compare",
            "recent_commits": "Recent commits", "uncertain": "Uncertain / inferred", "details": "Details", "new": "New",
            "removed": "Removed", "milestone": "Milestone", "waiting": "Waiting on", "worktree": "Uncommitted",
-           "sources": "Sources", "warnings": "Collector warnings", "changed": "Changed", "remaining": "Remaining"},
+           "sources": "Sources", "warnings": "Collector warnings", "changed": "Changed", "remaining": "Remaining",
+           "filter_all": "All", "filter_moving": "Moving", "filter_changed": "Changed", "filter_inferred": "Inferred",
+           "unmapped": "Not on the map", "accept": "Accept default", "override": "Override", "copied": "Copied",
+           "expired": "Expired", "default_taken": "Default stands", "see_path": "Show the other path",
+           "hide_path": "Hide the other path", "done_quiet": "Done", "scrub_then": "Then", "scrub_now": "Now",
+           "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you", "fork_if": "If you override",
+           "copy_hint": "Copy, then paste back to the agent", "copy": "Copy"},
 }
 
 
@@ -749,7 +796,205 @@ def badge(status, L):
     return f'<span class="badge s-{status}">{L[status]}</span>'
 
 
-def render_html(m, facts, marks, change_lines, style, prev_time):
+def attr(s):
+    return html.escape(str(s if s is not None else ""), quote=True)
+
+
+def part_indexes(parts):
+    by_id = {p["id"]: p for p in parts if p.get("id")}
+    by_name = {p["name"].casefold(): p["id"] for p in parts if p.get("name") and p.get("id")}
+    return by_id, by_name
+
+
+def link_of(obj, by_id, by_name):
+    """Part id shared by a card, a chain node, a pill, or a change line."""
+    part = obj.get("part")
+    if part in by_id:
+        return part
+    if obj.get("id") in by_id:
+        return obj["id"]
+    for key in ("label", "name"):
+        label = obj.get(key)
+        if isinstance(label, str) and label.casefold() in by_name:
+            return by_name[label.casefold()]
+    return None
+
+
+def parse_deadline(text, generated_at):
+    """Return an ISO timestamp, or None when the deadline is not a time we can count."""
+    if not text:
+        return None
+    s = str(text).strip()
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).isoformat(timespec="seconds")
+    except ValueError:
+        pass
+    base = None
+    if generated_at:
+        try:
+            base = dt.datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        except ValueError:
+            base = None
+    if base is None:
+        base = dt.datetime.now().astimezone()
+    m = re.fullmatch(r"(\d{2})-(\d{2})\s+(\d{2}):(\d{2})", s)
+    if m:
+        mo, d, hh, mm = (int(x) for x in m.groups())
+        try:
+            return base.replace(month=mo, day=d, hour=hh, minute=mm, second=0, microsecond=0).isoformat(timespec="seconds")
+        except ValueError:
+            return None
+    m = re.fullmatch(r"(\d{2}):(\d{2})", s)
+    if m:
+        hh, mm = (int(x) for x in m.groups())
+        try:
+            return base.replace(hour=hh, minute=mm, second=0, microsecond=0).isoformat(timespec="seconds")
+        except ValueError:
+            return None
+    return None
+
+
+def classify_evidence(raw):
+    s = str(raw).strip()
+    if len(s) >= 2 and s[0] == "`" and s[-1] == "`":
+        s = s[1:-1].strip()
+    if re.fullmatch(r"#\d{1,6}", s):
+        return "issue", s[1:], "#" + s[1:]
+    if re.fullmatch(r"[0-9a-fA-F]{7,12}", s):
+        return "commit", s[:7].lower(), s[:7]
+    return "file", s, s
+
+
+def evidence_chips(items):
+    out = []
+    for raw in (items or [])[:6]:
+        kind, ref, label = classify_evidence(raw)
+        shown = f"<code>{html.escape(label)}</code>" if str(raw).strip().startswith("`") else html.escape(label)
+        out.append(f'<button type="button" class="ev" data-kind="{kind}" data-ref="{attr(ref)}">{shown}</button>')
+    return "".join(out)
+
+
+def peek_db(facts):
+    """Subjects already collected, so a click can stay on the page."""
+    g = (facts or {}).get("git") or {}
+    gh = (facts or {}).get("github") or {}
+    commits, files, issues, prs = {}, {}, {}, {}
+    for c in g.get("commits") or []:
+        sha = (c.get("sha") or "")[:7].lower()
+        if sha:
+            commits[sha] = c.get("subject") or ""
+        for f in c.get("files") or []:
+            files.setdefault(f, c.get("subject") or "")
+    for i in gh.get("issues") or []:
+        issues[str(i.get("number"))] = i.get("title") or ""
+    for p in gh.get("prs") or []:
+        prs[str(p.get("number"))] = p.get("title") or ""
+    return {"issues": issues, "commits": commits, "prs": prs, "files": files}
+
+
+def unmapped_files(facts, parts):
+    """Files the next incremental pass cannot attach to a part."""
+    delta = (facts or {}).get("delta") or {}
+    raw = []
+    if isinstance(delta.get("unmapped_files"), list):
+        raw.extend(delta["unmapped_files"])
+    if isinstance(delta.get("worktree_changed"), list):
+        raw.extend(delta["worktree_changed"])
+    prefixes = [x.rstrip("*").rstrip("/") for p in parts for x in (p.get("paths") or []) if x]
+    out = []
+    for f in raw:
+        f = str(f).split(" -> ")[-1].strip().strip('"')
+        if not f or f in out:
+            continue
+        if any(f == x or f.startswith(x + "/") for x in prefixes):
+            continue
+        out.append(f)
+    return out[:40]
+
+
+def fork_decision(m):
+    for q in m.get("decisions") or []:
+        opts = q.get("options")
+        if q.get("id") and isinstance(opts, list) and len(opts) >= 2 and q.get("default") in opts:
+            return q
+    return None
+
+
+def nodes_for(nodes, decision_id, option_index):
+    kept = []
+    for n in nodes:
+        iff = n.get("if")
+        if not isinstance(iff, dict) or iff.get("decision") != decision_id:
+            kept.append(n)
+        elif iff.get("option") == option_index:
+            kept.append(n)
+    return kept
+
+
+def chain_row(nodes, edges, L, r, by_id, by_name, alt=False):
+    edge_map = {(e["from"], e["to"]): e for e in edges}
+    items = []
+    for i, n in enumerate(nodes):
+        st = cls(n.get("status"), PART_STATUS, "not_started")
+        bn = f'<span class="bn">{html.escape(L["bottleneck"])}</span>' if n.get("bottleneck") else ""
+        lid = link_of(n, by_id, by_name)
+        link = f' data-link="{attr(lid)}"' if lid else ""
+        iff = n.get("if") if isinstance(n.get("if"), dict) else None
+        fork = " fork-only" if iff else (" fork-shared" if alt else "")
+        items.append(
+            f'<div class="node n-{st}{" is-bn" if n.get("bottleneck") else ""} linkable{fork}"{link} '
+            f'role="button" tabindex="0">{bn}<b>{r(n["label"])}</b><span>{r(n.get("sub") or "")}</span></div>')
+        if i < len(nodes) - 1:
+            e = edge_map.get((n["id"], nodes[i + 1]["id"]))
+            kind = cls(e["kind"], EDGE_KIND, "none") if e else "none"
+            why = (e.get("why") or "") if e else ""
+            pop = r(why) if why else html.escape(L["no_edge"])
+            items.append(f'<div class="arrow a-{kind}" title="{attr(why or L["no_edge"])}">'
+                         f'<p class="why-pop">{pop}</p><span></span></div>')
+    return "".join(items)
+
+
+def frame_from(m):
+    parts = {}
+    for p in m.get("parts") or []:
+        pr = p.get("progress") or {}
+        parts[p["id"]] = {"status": p.get("status"), "done": pr.get("done"), "total": pr.get("total")}
+    return {
+        "t": m.get("generated_at") or "",
+        "label": fmt_time(m.get("generated_at")) if m.get("generated_at") else "",
+        "parts": parts,
+        "milestones": [{"name": s.get("name"), "status": s.get("status")} for s in m.get("milestones") or []],
+        "changes": [],
+    }
+
+
+def build_frames(history_dir, current):
+    """Previous snapshots plus the map being rendered. Change text is between neighbours."""
+    src = []
+    if history_dir and os.path.isdir(history_dir):
+        for name in sorted(os.listdir(history_dir)):
+            if not name.endswith(".json"):
+                continue
+            prev = load_json(os.path.join(history_dir, name))
+            if isinstance(prev, dict) and prev.get("parts"):
+                src.append(prev)
+    src = src[-7:] + [current]
+    frames, prev_m = [], None
+    for item in src:
+        fr = frame_from(item)
+        if prev_m is not None:
+            _, lines = diff_maps(prev_m, item)
+            fr["changes"] = [t for _, t in lines]
+        same = frames and {k: frames[-1][k] for k in ("parts", "milestones")} == {k: fr[k] for k in ("parts", "milestones")}
+        if same:
+            frames[-1] = fr
+        else:
+            frames.append(fr)
+        prev_m = item
+    return frames
+
+
+def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     L = labels(m)
     g = (facts or {}).get("git", {})
     slug = g.get("github")
@@ -758,8 +1003,11 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
     r = R(web, shas)
     P = m["project"]
     parts = m["parts"]
+    by_id, by_name = part_indexes(parts)
     n_done = sum(p["status"] == "done" for p in parts)
     n_stuck = sum(p["status"] == "stuck" for p in parts)
+    stray = unmapped_files(facts, parts)
+    fork = fork_decision(m)
 
     # header
     meta = [f'{L["updated"]} <b>{fmt_time(m.get("generated_at") or now_iso())}</b>']
@@ -792,53 +1040,68 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
             prop = f'<span class="tag">{L["proposed"]}</span>' if s.get("proposed") else ""
             here = f'<span class="here">{L["you_are_here"]}</span>' if st == "current" else ""
             nodes.append(
-                f'<li class="ms ms-{st}"{" id=here" if st == "current" else ""}>{here}<span class="dot"></span>{seg}'
+                f'<li class="ms ms-{st}" data-name="{attr(s["name"])}" data-now="{st}"'
+                f'{" id=here" if st == "current" else ""}>{here}<span class="dot"></span>{seg}'
                 f'<span class="ms-name">{r(s["name"])}</span>'
                 f'<span class="ms-note">{r(s.get("date") or L["ms_" + st])}{" · " + r(s["note"]) if s.get("note") else ""}</span>{prop}</li>')
         rem = m.get("remaining") or []
         cur_name = next((s["name"] for s in ms if s["status"] == "current"), "")
-        pills = "".join(f'<span class="pill p-{cls(x["status"], PART_STATUS, "not_started")}"><i></i>{r(x["label"])}'
-                        f'{"<em>" + r(x["note"]) + "</em>" if x.get("note") else ""}</span>' for x in rem)
+        pills = []
+        for x in rem:
+            lid = link_of(x, by_id, by_name)
+            link = f' data-link="{attr(lid)}" role="button" tabindex="0"' if lid else ""
+            lk = " linkable" if lid else ""
+            pills.append(f'<span class="pill p-{cls(x["status"], PART_STATUS, "not_started")}{lk}"{link}><i></i>{r(x["label"])}'
+                         f'{"<em>" + r(x["note"]) + "</em>" if x.get("note") else ""}</span>')
+        pills = "".join(pills)
         left = (f'<div class="left"><span class="big">{len(rem)}</span><span class="cap">{L["left_for"]} {r(cur_name)} {L["items"]}</span>'
                 f'<div class="pills">{pills}</div></div>') if rem else ""
         track = f'<section class="card track"><ol class="ms-list">{"".join(nodes)}</ol>{left}</section>'
 
-    # blocker chain: nodes in order, connectors from edges between neighbours
+    # blocker chain. A decision with options splits a second, quieter path.
     chain = ""
     ch = m.get("chain") or {}
     cn = ch.get("nodes") or []
+    bottleneck_label = next((n["label"] for n in cn if n.get("bottleneck")), "")
+    forked = False
     if cn:
-        edges = {(e["from"], e["to"]): e for e in ch.get("edges") or []}
+        edges = ch.get("edges") or []
+        main_nodes = cn
+        alt_nodes = []
+        alt_html = ""
+        forked = bool(fork) and any(isinstance(n.get("if"), dict) and n["if"].get("decision") == fork["id"] for n in cn)
+        if forked:
+            opts = fork["options"]
+            di = opts.index(fork["default"])
+            other = next(k for k in range(len(opts)) if k != di)
+            main_nodes = nodes_for(cn, fork["id"], di)
+            alt_nodes = nodes_for(cn, fork["id"], other)
+            sep = "：" if L is TEXT["zh"] else ": "
+            alt_html = (f'<p class="fork-label">{html.escape(L["fork_if"])}{sep}{r(opts[other])}</p>'
+                        f'<div class="chain chain-alt">{chain_row(alt_nodes, edges, L, r, by_id, by_name, alt=True)}</div>')
         used = set()
-        items = []
-        for i, n in enumerate(cn):
-            st = cls(n.get("status"), PART_STATUS, "not_started")
-            bn = f'<span class="bn">{L["bottleneck"]}</span>' if n.get("bottleneck") else ""
-            items.append(f'<div class="node n-{st}{" is-bn" if n.get("bottleneck") else ""}">{bn}'
-                         f'<b>{r(n["label"])}</b><span>{r(n.get("sub", ""))}</span></div>')
-            if i < len(cn) - 1:
-                e = edges.get((n["id"], cn[i + 1]["id"]))
-                kind = cls(e["kind"], EDGE_KIND, "none") if e else "none"
-                if e:
-                    used.add((e["from"], e["to"]))
-                tip = html.escape(e.get("why") or "", quote=True) if e else L["no_edge"]
-                items.append(f'<div class="arrow a-{kind}" title="{tip}"><span></span></div>')
+        for row in (main_nodes, alt_nodes):
+            used.update((row[i]["id"], row[i + 1]["id"]) for i in range(len(row) - 1))
         names = {n["id"]: n["label"] for n in cn}
-        why = []
-        for e in ch.get("edges") or []:
-            k = "evidence" if e["kind"] == "evidence" else "inferred"
-            extra = "" if (e["from"], e["to"]) in used else f' <span class="tag">{L["other_deps"]}</span>'
-            why.append(f'<li class="w-{k}"><b>{r(names[e["from"]])} → {r(names[e["to"]])}</b>{extra}'
-                       f'{"：" if L is TEXT["zh"] else ": "}{r(e.get("why") or "")}</li>')
+        extra = []
+        for e in edges:
+            pair = (e.get("from"), e.get("to"))
+            if pair in used or pair[0] not in names or pair[1] not in names:
+                continue
+            k = "evidence" if e.get("kind") == "evidence" else "inferred"
+            sep = "：" if L is TEXT["zh"] else ": "
+            extra.append(f'<li class="w-{k}"><b>{r(names[pair[0]])} → {r(names[pair[1]])}</b>'
+                         f' <span class="tag">{html.escape(L["other_deps"])}</span>{sep}{r(e.get("why", ""))}</li>')
+        extra_html = f'<ul class="why">{"".join(extra)}</ul>' if extra else ""
         legend = (f'<div class="legend"><span><i class="lg-e"></i>{L["evidence_edge"]}</span>'
                   f'<span><i class="lg-i"></i>{L["inferred_edge"]}</span>'
                   f'<span><i class="lg-b"></i>{L["bottleneck"]}</span></div>')
         chain = (f'<section class="card"><h2>{r(ch.get("title") or L["chain"])}</h2>'
-                 f'<div class="chain">{"".join(items)}</div>{legend}'
-                 f'<details class="why"><summary>{L["why"]}（{len(why)}）</summary><ul>{"".join(why)}</ul></details></section>')
+                 f'<div class="chain chain-default">{chain_row(main_nodes, edges, L, r, by_id, by_name)}</div>'
+                 f'{alt_html}{legend}{extra_html}</section>')
 
-    # parts
-    cards = []
+    # parts. Quiet done cards collapse; a done card that changed overnight stays in the grid.
+    active, quiet = [], []
     order = {"stuck": 0, "in_progress": 1, "not_started": 2, "done": 3}
     for p in sorted(parts, key=lambda p: (order[p["status"]], parts.index(p))):
         prog = ""
@@ -849,28 +1112,100 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
                     f'<span>{pr["done"]}/{pr["total"]}</span></div><div class="bar"><i style="width:{pct}%"></i></div></div>')
         chg = f'<span class="chg">{L["changed"]} · {r(marks[p["id"]])}</span>' if p["id"] in marks else ""
         inf = f'<span class="tag">{L["inferred"]}</span>' if p.get("inferred") else ""
-        colon = "：" if L is TEXT["zh"] else ": "
-        wait = f'<p class="wait">{L["waiting"]}{colon}{r(p["waiting_on"])}</p>' if p.get("waiting_on") else ""
-        ev = " · ".join(r(x) for x in (p.get("evidence") or [])[:6])
-        cards.append(f'<article class="part pt-{p["status"]}{" changed" if p["id"] in marks else ""}">'
-                     f'<div class="ph">{badge(p["status"], L)}{inf}{chg}</div><h3>{r(p["name"])}</h3>'
-                     f'<p>{r(p.get("summary", ""))}</p>{prog}{wait}<footer>{ev}</footer></article>')
+        changed = p["id"] in marks
+        stuck = p["status"] == "stuck" and p.get("waiting_on")
+        title = r(p["waiting_on"]) if stuck else r(p["name"])
+        eyebrow = f'<p class="eyebrow">{r(p["name"])}</p>' if stuck else ""
+        summary = f'<p>{r(p.get("summary", ""))}</p>' if p.get("summary") else ""
+        infer = " data-inferred" if p.get("inferred") else ""
+        pst = cls(p["status"], PART_STATUS, "not_started")
+        card = (f'<article class="part pt-{pst}{" changed" if changed else ""} linkable" '
+                f'data-link="{attr(p["id"])}" data-status="{pst}" data-now="{pst}"{infer} '
+                f'role="button" tabindex="0">'
+                f'<div class="ph">{badge(p["status"], L)}{inf}{chg}</div>{eyebrow}<h3>{title}</h3>'
+                f'{summary}{prog}<footer>{evidence_chips(p.get("evidence"))}</footer></article>')
+        if p["status"] == "done" and not changed:
+            quiet.append(card)
+        else:
+            active.append(card)
+    n_move = sum(p["status"] == "in_progress" for p in parts)
+    n_chg = sum(1 for p in parts if p["id"] in marks)
+    n_inf = sum(1 for p in parts if p.get("inferred"))
+    filters = (
+        f'<div class="filters" role="toolbar">'
+        f'<button type="button" data-filter="all" aria-pressed="true">{html.escape(L["filter_all"])}</button>'
+        f'<button type="button" data-filter="stuck" aria-pressed="false">{html.escape(L["stuck"])} <b>{n_stuck}</b></button>'
+        f'<button type="button" data-filter="in_progress" aria-pressed="false">{html.escape(L["filter_moving"])} <b>{n_move}</b></button>'
+        f'<button type="button" data-filter="changed" aria-pressed="false">{html.escape(L["filter_changed"])} <b>{n_chg}</b></button>'
+        f'<button type="button" data-filter="inferred" aria-pressed="false">{html.escape(L["filter_inferred"])} <b>{n_inf}</b></button>'
+        f'</div>')
+    stray_html = ""
+    if stray:
+        chips = "".join(f"<li><code>{html.escape(f)}</code></li>" for f in stray)
+        stray_html = (f'<div class="unmap"><span class="tag">{html.escape(L["unmapped"])}</span>'
+                      f'<ul class="plain">{chips}</ul></div>')
+    done_html = ""
+    if quiet:
+        names = "".join(
+            f'<button type="button" class="done-name" data-open="{attr(p["id"])}">{html.escape(p["name"])}</button>'
+            for p in parts if p["status"] == "done" and p["id"] not in marks)
+        done_html = (f'<details class="done-row"><summary>{html.escape(L["done_quiet"])} · {len(quiet)}</summary>'
+                     f'<div class="done-names">{names}</div><div class="parts">{"".join(quiet)}</div></details>')
     parts_html = (f'<section><div class="sh"><h2>{L["parts"]}</h2><span><b>{n_done}</b> / {len(parts)} {L["of_done"]}</span></div>'
-                  f'<div class="parts">{"".join(cards)}</div></section>')
+                  f'{filters}{stray_html}<div class="parts">{"".join(active)}</div>{done_html}</section>')
 
     # sidebar
     ns = m["next_step"]
     side = [f'<section class="card next"><h2>{L["next_step"]}</h2><p class="nt">{r(ns["title"])}</p>'
             f'<p>{r(ns.get("why", ""))}</p></section>']
     if m.get("decisions"):
-        qs = "".join(
-            f'<li><p class="q">{r(q["question"])}{" <span class=tag>" + L["proposed"] + "</span>" if q.get("proposed") else ""}</p>'
-            f'<p class="d">{L["by"] + " " + r(q["deadline"]) + " → " if q.get("deadline") else L["default"] + " → "}'
-            f'<b>{r(q["default"])}</b></p></li>' for q in m["decisions"])
-        side.append(f'<section class="card decide"><h2>{L["decisions"]}</h2><ul>{qs}</ul></section>')
+        qs = []
+        for i, q in enumerate(m["decisions"]):
+            did = q.get("id") or f"d{i}"
+            iso = parse_deadline(q.get("deadline"), m.get("generated_at"))
+            prop = f' <span class="tag">{L["proposed"]}</span>' if q.get("proposed") else ""
+            if q.get("reversible") is not True:
+                prop += f' <span class="tag waits">{html.escape(L["waits"])}</span>'
+            if q.get("deadline"):
+                stamp = f' data-deadline="{attr(iso)}"' if iso else ""
+                shown = fmt_time(iso) if iso else q["deadline"]
+                when = f'{html.escape(L["by"])} <time{stamp}>{r(shown)}</time> <span class="count"></span>→ '
+            else:
+                when = html.escape(L["default"]) + " → "
+            copy = attr("Decision: " + str(q.get("default") or "") + "\nQuestion: " + str(q.get("question") or "")).replace("\n", "&#10;")
+            alt = ""
+            opts = q.get("options") if isinstance(q.get("options"), list) else []
+            if forked and fork.get("id") == q.get("id"):
+                di = opts.index(q["default"])
+                other = next(k for k in range(len(opts)) if k != di)
+                alt = (f'<button type="button" class="act altpath" data-fork="{attr(q["id"])}" '
+                       f'data-option="{other}" data-show="{attr(L["see_path"])}" data-hide="{attr(L["hide_path"])}">'
+                       f'{html.escape(L["see_path"])}</button>')
+            qs.append(
+                f'<li data-decision="{attr(did)}">'
+                f'<p class="q">{r(q["question"])}{prop}</p>'
+                f'<p class="d">{when}<b class="def">{r(q["default"])}</b></p>'
+                f'<p class="taken">{html.escape(L["default_taken"])}</p>'
+                f'<div class="acts">'
+                f'<button type="button" class="act accept" data-copy="{copy}">{html.escape(L["accept"])}</button>'
+                f'{alt}'
+                f'<button type="button" class="act override">{html.escape(L["override"])}</button>'
+                f'<span class="copied">{html.escape(L["copied"])}</span></div>'
+                f'<form class="override-form" hidden>'
+                f'<input type="text" maxlength="240" aria-label="{attr(L["override"])}">'
+                f'<button type="submit">{html.escape(L["copy"])}</button></form>'
+                f'<p class="hint">{html.escape(L["copy_hint"])}</p></li>')
+        side.append(f'<section class="card decide"><h2>{L["decisions"]}</h2><ul>{"".join(qs)}</ul></section>')
     since = f'<span class="since">{fmt_time(prev_time)}</span>' if prev_time else ""
     if change_lines:
-        cl = "".join(f'<li><i class="dot-{cls(k, PART_STATUS + ("new",), "new")}"></i>{r(t)}</li>' for k, t in change_lines)
+        rows = []
+        for k, t in change_lines:
+            name = str(t).split(":", 1)[0].strip()
+            lid = by_name.get(name.casefold())
+            link = f' data-link="{attr(lid)}" role="button" tabindex="0"' if lid else ""
+            lk = "linkable" if lid else ""
+            rows.append(f'<li class="{lk}"{link}><i class="dot-{cls(k, PART_STATUS + ("new",), "new")}"></i>{r(t)}</li>')
+        cl = "".join(rows)
     else:
         cl = f'<li class="muted">{L["first_run"]}</li>'
     commits = ((facts or {}).get("git") or {}).get("commits") or []
@@ -905,12 +1240,40 @@ def render_html(m, facts, marks, change_lines, style, prev_time):
         foot.append(f'{L["warnings"]}：' + r("; ".join(facts["warnings"])))
     footer = "".join(f"<p>{x}</p>" for x in foot)
 
-    return PAGE.format(
+    expiring = sum(1 for q in (m.get("decisions") or []) if q.get("deadline"))
+    pin_bits = [f'<b>{html.escape(L["you_are_here"])}</b>']
+    if bottleneck_label:
+        pin_bits.append(f'<span>{r(bottleneck_label)}</span>')
+    pin_bits.append(f'<span>{r(m["next_step"]["title"])}</span>')
+    if expiring:
+        pin_bits.append(f'<span>{expiring} {html.escape(L["expiring"])}</span>')
+    if stray:
+        pin_bits.append(f'<span>{len(stray)} {html.escape(L["unmapped"])}</span>')
+    pin = f'<div class="pin" id="pin" hidden>{" · ".join(pin_bits)}</div>'
+    use_frames = frames if frames else [frame_from(m)]
+    scrub = ""
+    if len(use_frames) >= 2:
+        scrub = (f'<div class="scrub"><span>{html.escape(L["scrub_then"])}</span>'
+                 f'<input type="range" id="scrub" min="0" max="{len(use_frames) - 1}" value="{len(use_frames) - 1}" '
+                 f'aria-label="{attr(L["changes"])}">'
+                 f'<span>{html.escape(L["scrub_now"])}</span><span id="scrubcap"></span></div>')
+    payload = {
+        "slug": slug,
+        "peek": peek_db(facts),
+        "frames": use_frames,
+        "labels": {"expired": L["expired"], "open": L["open_link"]},
+    }
+    data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+    body = (f'{pin}{head}{scrub}{track}{chain}<div class="grid"><div class="main">{parts_html}</div>'
+            f'<aside>{"".join(side)}</aside></div>{details}<footer class="foot">{footer}</footer>'
+            f'<div id="peek" hidden role="dialog"><p id="peek-text"></p>'
+            f'<a id="peek-link" target="_blank" rel="noopener" hidden></a></div>')
+    page = PAGE.format(
         lang="zh-CN" if L is TEXT["zh"] else "en",
         title=html.escape(f'{P["name"]} · {L["title"]}'),
         theme=html.escape(style["theme"]), accent=html.escape(style["accent"]),
-        body=f'{head}{track}{chain}<div class="grid"><div class="main">{parts_html}</div>'
-             f'<aside>{"".join(side)}</aside></div>{details}<footer class="foot">{footer}</footer>')
+        body=body, data=data)
+    return page.replace("__SCRIPT__", SCRIPT)
 
 
 PAGE = """<!doctype html>
@@ -1019,18 +1382,351 @@ aside .card{{padding:16px 18px}}
 .tw{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;font-size:13px}} th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}}
 th{{color:var(--mut);font-weight:600}}
 .foot{{margin-top:20px;font-size:12px;color:var(--dim)}} .foot p{{margin:4px 0}}
+.pin{{position:fixed;z-index:30;top:10px;left:50%;transform:translateX(-50%);max-width:min(920px,calc(100% - 24px));
+display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;background:var(--card);border:1px solid var(--accent);
+border-radius:999px;padding:6px 14px;font-size:13px;box-shadow:0 8px 28px color-mix(in srgb,#000 35%,transparent)}}
+.pin[hidden]{{display:none}} .pin b{{color:var(--accent)}}
+.scrub{{display:flex;align-items:center;gap:8px;margin:-8px 0 16px;color:var(--mut);font-size:12px}}
+.scrub input{{flex:1}} #scrubcap{{color:var(--accent)}}
+.filters{{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}}
+.filters button,.act,.done-name,.ev{{font:inherit;cursor:pointer}}
+.filters button{{background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:3px 10px}}
+.filters button[aria-pressed=true]{{color:var(--fg);border-color:var(--accent)}}
+.filters b{{font-weight:600}}
+.unmap{{margin:0 0 12px}} .unmap .plain{{display:flex;flex-wrap:wrap;gap:6px 12px;list-style:none;padding:8px 0 0}}
+.eyebrow{{margin:0;font-size:12px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}}
+.done-row{{margin-top:12px;border:1px dashed var(--line);border-radius:12px;padding:0 12px 8px}}
+.done-row summary{{cursor:pointer;padding:10px 4px;color:var(--mut)}}
+.done-names{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}}
+.done-name{{background:transparent;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:2px 10px}}
+.ev{{background:transparent;color:var(--dim);border:0;border-bottom:1px dotted var(--dim);padding:0}}
+.part footer{{display:flex;flex-wrap:wrap;gap:6px 10px}}
+.acts{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}}
+.act{{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:3px 10px}}
+.act.accept{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--accent)}}
+.copied,.taken,.hint{{display:none}} .hint{{color:var(--dim);font-size:12px;margin:6px 0 0}}
+.decide li.copied-on .copied,.decide li .hint{{display:inline}}
+.decide li.expired .q{{text-decoration:line-through;color:var(--dim)}}
+.decide li.expired .taken{{display:block;color:var(--accent);margin:4px 0 0;font-size:13px}}
+.override-form{{display:flex;gap:6px;margin-top:8px}} .override-form[hidden]{{display:none}}
+.override-form input{{flex:1;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:4px 8px}}
+.chain-alt{{display:none;margin-top:8px}} .fork-label{{display:none;margin:8px 0 0;color:var(--mut);font-size:13px}}
+body[data-fork] .chain-alt,body[data-fork] .fork-label{{display:flex}}
+body[data-fork] .fork-label{{display:block}}
+body[data-fork] .chain-default .fork-only{{opacity:.38}}
+.chain-alt .fork-shared{{opacity:.55}}
+body[data-focus] .linkable{{opacity:.38}}
+body[data-focus] .linkable.on{{opacity:1;outline:2px solid var(--accent);outline-offset:2px}}
+body[data-filter=stuck] .part:not([data-status=stuck]),
+body[data-filter=in_progress] .part:not([data-status=in_progress]),
+body[data-filter=changed] .part:not(.changed),
+body[data-filter=inferred] .part:not([data-inferred]){{display:none}}
+body[data-filter=stuck] .pill:not(.p-stuck),
+body[data-filter=in_progress] .pill:not(.p-in_progress){{display:none}}
+.part[data-hist=stuck]{{border-color:var(--stuck)}}
+.part[data-hist=done]{{border-color:color-mix(in srgb,var(--done) 50%,var(--line))}}
+.part[data-hist=in_progress]{{border-color:color-mix(in srgb,var(--prog) 55%,var(--line))}}
+#peek{{position:fixed;z-index:40;max-width:280px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;box-shadow:0 10px 30px color-mix(in srgb,#000 40%,transparent)}}
+#peek[hidden]{{display:none}} #peek a{{color:var(--accent);display:inline-block;margin-top:6px}}
+.why-pop{{display:none;position:absolute;z-index:4;top:18px;left:0;width:200px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}}
+.arrow.open .why-pop{{display:block}}
+@keyframes yah-pulse{{0%,100%{{box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 14%,transparent)}}50%{{box-shadow:0 0 0 8px color-mix(in srgb,var(--accent) 28%,transparent)}}}}
+.is-bn{{animation:yah-pulse 2.4s ease-in-out infinite}}
+@media (prefers-reduced-motion:reduce){{.is-bn{{animation:none}} .part,.ms{{transition:none}}}}
 @media (max-width:900px){{.grid{{grid-template-columns:1fr}}}}
 @media (max-width:640px){{h1{{font-size:23px}} .card{{padding:14px}}
  .chain{{flex-direction:column;overflow:visible}} .node{{max-width:none;flex:none}}
  .arrow{{flex:0 0 26px;justify-content:center}} .arrow span{{flex:0 0 2px;height:100%;width:2px}}
  .a-inferred span{{background:repeating-linear-gradient(180deg,var(--mut) 0 4px,transparent 4px 8px)}}
  .arrow::after{{right:auto;bottom:0;border:5px solid transparent;border-top:7px solid var(--mut)}}
- .ms{{flex-basis:112px}}}}
+ .why-pop{{position:static;width:auto}}
+ .ms{{flex-basis:112px}} .pin{{border-radius:14px}}}}
 </style>
 </head>
 <body><div class="wrap">{body}</div>
-<script>var h=document.getElementById("here");if(h&&h.parentElement.scrollWidth>h.parentElement.clientWidth)h.parentElement.scrollLeft=h.offsetLeft-h.parentElement.clientWidth/2+60;</script>
+<script type="application/json" id="yah">{data}</script>
+<script>__SCRIPT__</script>
 </body></html>
+"""
+
+
+SCRIPT = r"""
+(function () {
+  var raw = document.getElementById("yah");
+  var DATA = {};
+  try { DATA = JSON.parse(raw ? raw.textContent : "{}"); } catch (e) { DATA = {}; }
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var frames = DATA.frames || [];
+
+  function motion() { return reduce ? "auto" : "smooth"; }
+
+  var here = document.getElementById("here");
+  if (here && here.parentElement && here.parentElement.scrollWidth > here.parentElement.clientWidth) {
+    here.parentElement.scrollLeft = here.offsetLeft - here.parentElement.clientWidth / 2 + 60;
+  }
+
+  var pin = document.getElementById("pin");
+  if (here && pin && "IntersectionObserver" in window) {
+    new IntersectionObserver(function (entries) {
+      pin.hidden = entries[0].isIntersecting;
+    }, { threshold: 0.35 }).observe(here);
+  }
+
+  function setHist(el, status) {
+    if (!status) return;
+    el.setAttribute("data-hist", status);
+  }
+  function applyFrame(frame) {
+    if (!frame) return;
+    var cards = document.querySelectorAll(".part[data-link]");
+    for (var i = 0; i < cards.length; i++) {
+      var p = (frame.parts || {})[cards[i].getAttribute("data-link")];
+      setHist(cards[i], p ? p.status : cards[i].getAttribute("data-now"));
+    }
+    var ms = document.querySelectorAll(".ms[data-name]");
+    for (var j = 0; j < ms.length; j++) {
+      var name = ms[j].getAttribute("data-name");
+      var found = null;
+      var list = frame.milestones || [];
+      for (var k = 0; k < list.length; k++) if (list[k].name === name) found = list[k];
+      var st = found ? found.status : ms[j].getAttribute("data-now");
+      ms[j].classList.remove("ms-done", "ms-current", "ms-future");
+      if (st) ms[j].classList.add("ms-" + st);
+    }
+    var cap = document.getElementById("scrubcap");
+    if (cap) cap.textContent = frame.label || "";
+    var changes = document.querySelector(".changes ul");
+    if (changes && frame.changes && frame.changes.length && document.body.getAttribute("data-scrub") === "1") {
+      if (!changes.getAttribute("data-saved")) changes.setAttribute("data-saved", changes.innerHTML);
+      var html = "";
+      for (var c = 0; c < frame.changes.length; c++) {
+        html += '<li><i></i>' + frame.changes[c].replace(/[&<>]/g, function (ch) {
+          return ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : "&gt;";
+        }) + "</li>";
+      }
+      changes.innerHTML = html;
+    }
+  }
+  function restoreChanges() {
+    var changes = document.querySelector(".changes ul");
+    if (changes && changes.getAttribute("data-saved")) {
+      changes.innerHTML = changes.getAttribute("data-saved");
+      changes.removeAttribute("data-saved");
+    }
+  }
+  var scrub = document.getElementById("scrub");
+  if (scrub && frames.length >= 2) {
+    scrub.addEventListener("input", function () {
+      document.body.setAttribute("data-scrub", "1");
+      applyFrame(frames[Number(scrub.value)]);
+    });
+    scrub.addEventListener("change", function () {
+      scrub.value = String(frames.length - 1);
+      document.body.removeAttribute("data-scrub");
+      applyFrame(frames[frames.length - 1]);
+      restoreChanges();
+      var cap = document.getElementById("scrubcap");
+      if (cap) cap.textContent = "";
+    });
+  }
+  if (!reduce && frames.length >= 2) {
+    var a = Date.parse(frames[frames.length - 2].t || "");
+    var b = Date.parse(frames[frames.length - 1].t || "");
+    if (a && b && b - a > 6 * 3600 * 1000) {
+      applyFrame(frames[frames.length - 2]);
+      document.body.classList.add("replaying");
+      setTimeout(function () {
+        applyFrame(frames[frames.length - 1]);
+        document.body.classList.remove("replaying");
+      }, 1500);
+    }
+  }
+
+  function clearFocus() {
+    document.body.removeAttribute("data-focus");
+    var on = document.querySelectorAll(".linkable.on");
+    for (var i = 0; i < on.length; i++) on[i].classList.remove("on");
+  }
+  function focusLink(id, origin) {
+    if (!id) return;
+    if (document.body.getAttribute("data-focus") === id) { clearFocus(); return; }
+    document.body.setAttribute("data-focus", id);
+    var all = document.querySelectorAll(".linkable");
+    var card = null, node = null;
+    for (var i = 0; i < all.length; i++) {
+      var hit = all[i].getAttribute("data-link") === id;
+      all[i].classList.toggle("on", hit);
+      if (hit && all[i].classList.contains("part")) card = all[i];
+      if (hit && all[i].classList.contains("node")) node = all[i];
+    }
+    var dest = origin && origin.classList.contains("part") ? node : card;
+    if (card) {
+      var box = card.closest("details");
+      if (box) box.open = true;
+    }
+    if (dest && dest.scrollIntoView) dest.scrollIntoView({ block: "nearest", behavior: motion() });
+    if (origin && origin.classList.contains("is-bn") && card) {
+      var ev = card.querySelector(".ev");
+      if (ev) openPeek(ev);
+    }
+  }
+
+  var peek = document.getElementById("peek");
+  function openPeek(btn) {
+    if (!peek) return;
+    var kind = btn.getAttribute("data-kind");
+    var ref = btn.getAttribute("data-ref");
+    var db = DATA.peek || {};
+    var text = ref;
+    var href = "";
+    if (kind === "issue") {
+      text = (db.issues && db.issues[ref]) || (db.prs && db.prs[ref]) || ("#" + ref);
+      if (db.issues && db.issues[ref]) text = "#" + ref + " " + db.issues[ref];
+      else if (db.prs && db.prs[ref]) text = "#" + ref + " " + db.prs[ref];
+      if (DATA.slug) href = "https://github.com/" + DATA.slug + "/issues/" + ref;
+    } else if (kind === "commit") {
+      text = (db.commits && db.commits[ref]) ? (ref + " " + db.commits[ref]) : ref;
+      if (DATA.slug) href = "https://github.com/" + DATA.slug + "/commit/" + ref;
+    } else {
+      text = ref;
+      var files = db.files || {};
+      if (files[ref]) text = ref + " — " + files[ref];
+      else {
+        for (var path in files) {
+          if (files.hasOwnProperty(path) && (path.indexOf(ref) === 0 || ref.indexOf(path) === 0)) {
+            text = ref + " — " + files[path];
+            break;
+          }
+        }
+      }
+    }
+    document.getElementById("peek-text").textContent = text;
+    var link = document.getElementById("peek-link");
+    if (href) { link.hidden = false; link.href = href; link.textContent = (DATA.labels && DATA.labels.open) || "Open"; }
+    else link.hidden = true;
+    peek.hidden = false;
+    var box = btn.getBoundingClientRect();
+    peek.style.top = Math.max(8, Math.min(box.bottom + 6, window.innerHeight - 110)) + "px";
+    peek.style.left = Math.max(8, Math.min(box.left, window.innerWidth - 290)) + "px";
+  }
+
+  function copyText(text, li) {
+    function ok() { if (li) li.classList.add("copied-on"); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok, function () { fallback(); });
+    } else fallback();
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); ok(); } catch (e) {}
+      ta.parentNode.removeChild(ta);
+    }
+  }
+
+  function tick() {
+    var nodes = document.querySelectorAll("time[data-deadline]");
+    var now = Date.now();
+    for (var i = 0; i < nodes.length; i++) {
+      var t = Date.parse(nodes[i].getAttribute("data-deadline"));
+      var count = nodes[i].parentNode.querySelector(".count");
+      var li = nodes[i].closest("li");
+      if (!t || !count) continue;
+      var delta = t - now;
+      if (delta <= 0) {
+        count.textContent = (DATA.labels && DATA.labels.expired) || "";
+        if (li) li.classList.add("expired");
+      } else {
+        var mins = Math.round(delta / 60000);
+        var h = Math.floor(mins / 60);
+        var m = mins % 60;
+        count.textContent = (h ? h + "h " : "") + m + "m ";
+      }
+    }
+  }
+  tick();
+  setInterval(tick, 30000);
+
+  document.body.addEventListener("click", function (ev) {
+    var arrow = ev.target.closest ? ev.target.closest(".arrow") : null;
+    if (arrow) {
+      ev.stopPropagation();
+      var open = document.querySelectorAll(".arrow.open");
+      for (var i = 0; i < open.length; i++) if (open[i] !== arrow) open[i].classList.remove("open");
+      arrow.classList.toggle("open");
+      return;
+    }
+    var evidence = ev.target.closest ? ev.target.closest(".ev") : null;
+    if (evidence) { ev.stopPropagation(); openPeek(evidence); return; }
+    var filter = ev.target.closest ? ev.target.closest("[data-filter]") : null;
+    if (filter) {
+      var name = filter.getAttribute("data-filter");
+      var buttons = document.querySelectorAll("[data-filter]");
+      for (var f = 0; f < buttons.length; f++) buttons[f].setAttribute("aria-pressed", buttons[f] === filter ? "true" : "false");
+      if (name === "all") document.body.removeAttribute("data-filter");
+      else document.body.setAttribute("data-filter", name);
+      return;
+    }
+    var accept = ev.target.closest ? ev.target.closest(".accept") : null;
+    if (accept) {
+      ev.stopPropagation();
+      copyText(accept.getAttribute("data-copy") || "", accept.closest("li"));
+      return;
+    }
+    var over = ev.target.closest ? ev.target.closest(".override") : null;
+    if (over && over.tagName === "BUTTON") {
+      ev.stopPropagation();
+      var form = over.parentNode.parentNode.querySelector(".override-form");
+      if (form) form.hidden = !form.hidden;
+      return;
+    }
+    var alt = ev.target.closest ? ev.target.closest(".altpath") : null;
+    if (alt) {
+      ev.stopPropagation();
+      var id = alt.getAttribute("data-fork");
+      if (document.body.getAttribute("data-fork") === id) {
+        document.body.removeAttribute("data-fork");
+        alt.textContent = alt.getAttribute("data-show");
+      } else {
+        document.body.setAttribute("data-fork", id);
+        alt.textContent = alt.getAttribute("data-hide");
+      }
+      return;
+    }
+    var nameBtn = ev.target.closest ? ev.target.closest(".done-name") : null;
+    if (nameBtn) {
+      ev.stopPropagation();
+      var box = nameBtn.closest("details");
+      if (box) box.open = true;
+      focusLink(nameBtn.getAttribute("data-open"), null);
+      return;
+    }
+    if (peek && !peek.hidden && !(ev.target.closest && ev.target.closest("#peek"))) peek.hidden = true;
+    var link = ev.target.closest ? ev.target.closest("[data-link]") : null;
+    if (link) focusLink(link.getAttribute("data-link"), link);
+  });
+
+  document.body.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form.classList || !form.classList.contains("override-form")) return;
+    ev.preventDefault();
+    var input = form.querySelector("input");
+    var text = input ? input.value.replace(/^\s+|\s+$/g, "") : "";
+    if (!text) return;
+    var li = form.closest("li");
+    var q = li ? (li.querySelector(".q").textContent || "") : "";
+    copyText("Decision: " + text + "\nQuestion: " + q, li);
+  });
+
+  document.body.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    var link = ev.target.closest ? ev.target.closest("[data-link]") : null;
+    if (!link || ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "BUTTON") return;
+    ev.preventDefault();
+    focusLink(link.getAttribute("data-link"), link);
+  });
+})();
 """
 
 
@@ -1069,7 +1765,8 @@ def render(repo, d):
     prev = load_json(state["last_map"]) if state.get("last_map") else None
     marks, lines = diff_maps(prev, m)
     prev_time = (prev.get("generated_at") or state.get("last_render")) if prev else None
-    page = render_html(m, facts, marks, lines, style, prev_time)
+    frames = build_frames(os.path.join(d, "history"), m)
+    page = render_html(m, facts, marks, lines, style, prev_time, frames)
     write_text(os.path.join(d, "index.html"), page)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     snap = os.path.join(d, "history", f"{stamp}.json")

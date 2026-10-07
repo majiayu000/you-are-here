@@ -55,8 +55,12 @@ pr and run list). It writes only inside the output dir and holds a lock there wh
    milestones (one `current`), `remaining` for the current milestone, a `chain` whose node order is
    the main path left → right with the current bottleneck marked, parts with `paths` so the next
    collect can map changed files, `next_step`, `decisions` (each with a `default`; add a
-   `deadline` when the user will be away), `uncertain`. Choose `panels` that fit this project —
-   no fixed template.
+   `deadline` plus `"reversible": true` only for reversible, local choices — merges, pushes, releases,
+   deletions and spending never get a deadline), `uncertain`. Choose `panels` that fit this project —
+   no fixed template. When a chain node or remaining item is the same work as a part, set `part`
+   to that part's id. A decision may list `options` (the `default` must be one of them). A chain
+   node may set `if` to `{"decision": "<id>", "option": <index>}` so the page can draw the other
+   path. Omit `options` and `if` when there is no real fork.
 5. **Render.** `PMAP render <repo> [--out DIR]`. It validates first; fix any `error:` lines and
    re-run. It writes `index.html` (opens with a double-click), snapshots the map to `history/`, and
    prints what changed since the previous render.

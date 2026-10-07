@@ -41,24 +41,30 @@ MORNING = {
         {"name": "1.0", "status": "future", "proposed": True},
     ],
     "remaining": [
-        {"label": "PDF export", "status": "in_progress", "note": "2 files"},
-        {"label": "Sync conflicts", "status": "stuck", "note": "server clock"},
-        {"label": "Onboarding", "status": "not_started"},
+        {"label": "PDF export", "status": "in_progress", "note": "2 files", "part": "export"},
+        {"label": "Sync conflicts", "status": "stuck", "note": "server clock", "part": "sync"},
+        {"label": "Onboarding", "status": "not_started", "part": "onboarding"},
     ],
     "chain": {
         "nodes": [
-            {"id": "clock", "label": "Server clock API", "sub": "your call", "status": "stuck", "bottleneck": True},
-            {"id": "sync", "label": "Sync conflicts", "sub": "resolver waits on clock", "status": "stuck"},
-            {"id": "pdf", "label": "PDF export", "sub": "2 files left", "status": "in_progress"},
-            {"id": "onb", "label": "Onboarding", "sub": "3 screens", "status": "not_started"},
+            {"id": "clock", "label": "Server clock API", "sub": "your call", "status": "stuck", "bottleneck": True, "part": "sync"},
+            {"id": "clockwork", "label": "Implement server clock", "sub": "only if you block on it", "status": "not_started",
+             "if": {"decision": "clock", "option": 1}, "part": "sync"},
+            {"id": "sync", "label": "Sync conflicts", "sub": "resolver waits on clock", "status": "stuck",
+             "if": {"decision": "clock", "option": 1}, "part": "sync"},
+            {"id": "pdf", "label": "PDF export", "sub": "2 files left", "status": "in_progress",
+             "if": {"decision": "clock", "option": 0}, "part": "export"},
+            {"id": "onb", "label": "Onboarding", "sub": "3 screens", "status": "not_started", "part": "onboarding"},
             {"id": "beta", "label": "Public beta", "sub": "tag + release notes", "status": "not_started"},
         ],
         "edges": [
-            {"from": "clock", "to": "sync", "kind": "evidence",
-             "why": "`src/sync/conflict.ts` TODO: last-writer-wins needs a trusted server timestamp"},
-            {"from": "sync", "to": "pdf", "kind": "inferred", "why": "independent; listed in suggested order"},
+            {"from": "clock", "to": "pdf", "kind": "inferred", "why": "default keeps local clocks and continues PDF export"},
             {"from": "pdf", "to": "onb", "kind": "inferred", "why": "onboarding demo exports a PDF"},
             {"from": "onb", "to": "beta", "kind": "evidence", "why": "ROADMAP.md: beta requires onboarding"},
+            {"from": "clock", "to": "clockwork", "kind": "inferred", "why": "only if you choose to block on the server clock"},
+            {"from": "clockwork", "to": "sync", "kind": "evidence",
+             "why": "`src/sync/conflict.ts` TODO: last-writer-wins needs a trusted server timestamp"},
+            {"from": "sync", "to": "onb", "kind": "inferred", "why": "onboarding waits until sync conflicts are decided"},
         ],
     },
     "parts": [
@@ -78,8 +84,10 @@ MORNING = {
     ],
     "next_step": {"title": "Finish PDF export", "why": "2 files left; it does not depend on the sync decision."},
     "decisions": [
-        {"question": "Use the server clock for sync conflicts?", "default": "keep local clocks, continue on PDF export",
-         "deadline": "10:00"},
+        {"id": "clock", "question": "Use the server clock for sync conflicts?",
+         "default": "keep local clocks, continue on PDF export",
+         "options": ["keep local clocks, continue on PDF export", "block on the server clock first"],
+         "deadline": "2026-10-08T10:00:00+08:00", "reversible": True},
     ],
     "uncertain": ["PDF export tested on A4 only."],
     "panels": [
@@ -123,16 +131,27 @@ def main():
         sh("git", "-C", repo, "commit", "-qm", subject, env={**env, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date})
     run = lambda *a: sh(sys.executable, PMAP, *a, repo, "--out", out, env=env)
     run("collect", "--no-gh")
-    for m in (evening(), MORNING):
-        with open(os.path.join(out, "map.json"), "w") as fh:
-            json.dump(m, fh)
-        run("render")
+    with open(os.path.join(out, "map.json"), "w") as fh:
+        json.dump(evening(), fh)
+    run("render")
+    scratch = os.path.join(repo, "docs", "scratch.md")
+    os.makedirs(os.path.dirname(scratch), exist_ok=True)
+    with open(scratch, "w") as fh:
+        fh.write("not on the map\n")
+    sh("git", "-C", repo, "add", ".")
+    sh("git", "-C", repo, "commit", "-qm", "docs: scratch note",
+       env={**env, "GIT_AUTHOR_DATE": "2026-10-07T07:00:00+08:00", "GIT_COMMITTER_DATE": "2026-10-07T07:00:00+08:00"})
+    run("collect", "--no-gh")
+    with open(os.path.join(out, "map.json"), "w") as fh:
+        json.dump(MORNING, fh)
+    run("render")
     shutil.copy(os.path.join(out, "index.html"), os.path.join(HERE, "index.html"))
     chrome = next((c for c in CHROME if c and os.path.exists(c)), None)
     if chrome:
         png = os.path.join(ROOT, "docs", "screenshot.png")
         sh(chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2",
-           "--window-size=1280,1180", f"--screenshot={png}", "file://" + os.path.join(HERE, "index.html"))
+           "--virtual-time-budget=4000", "--window-size=1280,1500",
+           f"--screenshot={png}", "file://" + os.path.join(HERE, "index.html"))
         print(png)
     else:
         print("Chrome not found: open docs/demo/index.html and take the screenshot by hand")

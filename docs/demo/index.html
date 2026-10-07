@@ -104,15 +104,345 @@ aside .card{padding:16px 18px}
 .tw{overflow-x:auto} table{border-collapse:collapse;width:100%;font-size:13px} th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--mut);font-weight:600}
 .foot{margin-top:20px;font-size:12px;color:var(--dim)} .foot p{margin:4px 0}
+.pin{position:fixed;z-index:30;top:10px;left:50%;transform:translateX(-50%);max-width:min(920px,calc(100% - 24px));
+display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;background:var(--card);border:1px solid var(--accent);
+border-radius:999px;padding:6px 14px;font-size:13px;box-shadow:0 8px 28px color-mix(in srgb,#000 35%,transparent)}
+.pin[hidden]{display:none} .pin b{color:var(--accent)}
+.scrub{display:flex;align-items:center;gap:8px;margin:-8px 0 16px;color:var(--mut);font-size:12px}
+.scrub input{flex:1} #scrubcap{color:var(--accent)}
+.filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+.filters button,.act,.done-name,.ev{font:inherit;cursor:pointer}
+.filters button{background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+.filters button[aria-pressed=true]{color:var(--fg);border-color:var(--accent)}
+.filters b{font-weight:600}
+.unmap{margin:0 0 12px} .unmap .plain{display:flex;flex-wrap:wrap;gap:6px 12px;list-style:none;padding:8px 0 0}
+.eyebrow{margin:0;font-size:12px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}
+.done-row{margin-top:12px;border:1px dashed var(--line);border-radius:12px;padding:0 12px 8px}
+.done-row summary{cursor:pointer;padding:10px 4px;color:var(--mut)}
+.done-names{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.done-name{background:transparent;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
+.ev{background:transparent;color:var(--dim);border:0;border-bottom:1px dotted var(--dim);padding:0}
+.part footer{display:flex;flex-wrap:wrap;gap:6px 10px}
+.acts{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}
+.act{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:3px 10px}
+.act.accept{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--accent)}
+.copied,.taken,.hint{display:none} .hint{color:var(--dim);font-size:12px;margin:6px 0 0}
+.decide li.copied-on .copied,.decide li .hint{display:inline}
+.decide li.expired .q{text-decoration:line-through;color:var(--dim)}
+.decide li.expired .taken{display:block;color:var(--accent);margin:4px 0 0;font-size:13px}
+.override-form{display:flex;gap:6px;margin-top:8px} .override-form[hidden]{display:none}
+.override-form input{flex:1;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:4px 8px}
+.chain-alt{display:none;margin-top:8px} .fork-label{display:none;margin:8px 0 0;color:var(--mut);font-size:13px}
+body[data-fork] .chain-alt,body[data-fork] .fork-label{display:flex}
+body[data-fork] .fork-label{display:block}
+body[data-fork] .chain-default .fork-only{opacity:.38}
+.chain-alt .fork-shared{opacity:.55}
+body[data-focus] .linkable{opacity:.38}
+body[data-focus] .linkable.on{opacity:1;outline:2px solid var(--accent);outline-offset:2px}
+body[data-filter=stuck] .part:not([data-status=stuck]),
+body[data-filter=in_progress] .part:not([data-status=in_progress]),
+body[data-filter=changed] .part:not(.changed),
+body[data-filter=inferred] .part:not([data-inferred]){display:none}
+body[data-filter=stuck] .pill:not(.p-stuck),
+body[data-filter=in_progress] .pill:not(.p-in_progress){display:none}
+.part[data-hist=stuck]{border-color:var(--stuck)}
+.part[data-hist=done]{border-color:color-mix(in srgb,var(--done) 50%,var(--line))}
+.part[data-hist=in_progress]{border-color:color-mix(in srgb,var(--prog) 55%,var(--line))}
+#peek{position:fixed;z-index:40;max-width:280px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;box-shadow:0 10px 30px color-mix(in srgb,#000 40%,transparent)}
+#peek[hidden]{display:none} #peek a{color:var(--accent);display:inline-block;margin-top:6px}
+.why-pop{display:none;position:absolute;z-index:4;top:18px;left:0;width:200px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}
+.arrow.open .why-pop{display:block}
+@keyframes yah-pulse{0%,100%{box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 14%,transparent)}50%{box-shadow:0 0 0 8px color-mix(in srgb,var(--accent) 28%,transparent)}}
+.is-bn{animation:yah-pulse 2.4s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.is-bn{animation:none} .part,.ms{transition:none}}
 @media (max-width:900px){.grid{grid-template-columns:1fr}}
 @media (max-width:640px){h1{font-size:23px} .card{padding:14px}
  .chain{flex-direction:column;overflow:visible} .node{max-width:none;flex:none}
  .arrow{flex:0 0 26px;justify-content:center} .arrow span{flex:0 0 2px;height:100%;width:2px}
  .a-inferred span{background:repeating-linear-gradient(180deg,var(--mut) 0 4px,transparent 4px 8px)}
  .arrow::after{right:auto;bottom:0;border:5px solid transparent;border-top:7px solid var(--mut)}
- .ms{flex-basis:112px}}
+ .why-pop{position:static;width:auto}
+ .ms{flex-basis:112px} .pin{border-radius:14px}}
 </style>
 </head>
-<body><div class="wrap"><header><h1>lumen<span class="sub">Project map</span></h1><p class="summary">Local-first Markdown notes with sync and export.</p><p class="meta">Updated <b>10-07 07:12</b> · <b>5</b> recent commits · <b>2/6</b> done · <span class="stuck-dot"></span><b class="c-stuck">1 Stuck</b></p></header><section class="card track"><ol class="ms-list"><li class="ms ms-done"><span class="dot"></span><span class="seg solid"></span><span class="ms-name">Editor core</span><span class="ms-note">Sep 21</span></li><li class="ms ms-done"><span class="dot"></span><span class="seg solid"></span><span class="ms-name">Search</span><span class="ms-note">Oct 7</span></li><li class="ms ms-current" id=here><span class="here">You are here</span><span class="dot"></span><span class="seg dotted"></span><span class="ms-name">Public beta</span><span class="ms-note">In progress · 3 left</span></li><li class="ms ms-future"><span class="dot"></span><span class="seg dotted"></span><span class="ms-name">Sync v2</span><span class="ms-note">Later</span></li><li class="ms ms-future"><span class="dot"></span><span class="ms-name">1.0</span><span class="ms-note">Later</span><span class="tag">proposed</span></li></ol><div class="left"><span class="big">3</span><span class="cap">Left for Public beta </span><div class="pills"><span class="pill p-in_progress"><i></i>PDF export<em>2 files</em></span><span class="pill p-stuck"><i></i>Sync conflicts<em>server clock</em></span><span class="pill p-not_started"><i></i>Onboarding</span></div></div></section><section class="card"><h2>Blockers to the next milestone</h2><div class="chain"><div class="node n-stuck is-bn"><span class="bn">Bottleneck</span><b>Server clock API</b><span>your call</span></div><div class="arrow a-evidence" title="`src/sync/conflict.ts` TODO: last-writer-wins needs a trusted server timestamp"><span></span></div><div class="node n-stuck"><b>Sync conflicts</b><span>resolver waits on clock</span></div><div class="arrow a-inferred" title="independent; listed in suggested order"><span></span></div><div class="node n-in_progress"><b>PDF export</b><span>2 files left</span></div><div class="arrow a-inferred" title="onboarding demo exports a PDF"><span></span></div><div class="node n-not_started"><b>Onboarding</b><span>3 screens</span></div><div class="arrow a-evidence" title="ROADMAP.md: beta requires onboarding"><span></span></div><div class="node n-not_started"><b>Public beta</b><span>tag + release notes</span></div></div><div class="legend"><span><i class="lg-e"></i>Evidenced dependency</span><span><i class="lg-i"></i>Inferred order</span><span><i class="lg-b"></i>Bottleneck</span></div><details class="why"><summary>Why（4）</summary><ul><li class="w-evidence"><b>Server clock API → Sync conflicts</b>: <code>src/sync/conflict.ts</code> TODO: last-writer-wins needs a trusted server timestamp</li><li class="w-inferred"><b>Sync conflicts → PDF export</b>: independent; listed in suggested order</li><li class="w-inferred"><b>PDF export → Onboarding</b>: onboarding demo exports a PDF</li><li class="w-evidence"><b>Onboarding → Public beta</b>: ROADMAP.md: beta requires onboarding</li></ul></details></section><div class="grid"><div class="main"><section><div class="sh"><h2>Parts</h2><span><b>2</b> / 6 done</span></div><div class="parts"><article class="part pt-stuck changed"><div class="ph"><span class="badge s-stuck">Stuck</span><span class="chg">Changed · In progress → Stuck</span></div><h3>Sync</h3><p>Two-device sync works; conflicts don&#x27;t.</p><p class="wait">Waiting on: a decision on the server clock API</p><footer><code>src/sync/conflict.ts</code> · #27</footer></article><article class="part pt-in_progress changed"><div class="ph"><span class="badge s-in_progress">In progress</span><span class="chg">Changed · 3/9 → 7/9</span></div><h3>PDF export</h3><p>Page breaks and headers done.</p><div class="prog"><div class="pl"><span>files</span><span>7/9</span></div><div class="bar"><i style="width:78%"></i></div></div><footer>#24</footer></article><article class="part pt-not_started"><div class="ph"><span class="badge s-not_started">Not started</span></div><h3>Onboarding</h3><p>Three intro screens.</p><footer>ROADMAP.md</footer></article><article class="part pt-not_started"><div class="ph"><span class="badge s-not_started">Not started</span><span class="tag">inferred</span></div><h3>Themes</h3><p>After beta.</p><footer></footer></article><article class="part pt-done"><div class="ph"><span class="badge s-done">Done</span></div><h3>Editor</h3><p>Markdown editing, tables, live preview.</p><footer><code>src/editor/</code> · #12</footer></article><article class="part pt-done changed"><div class="ph"><span class="badge s-done">Done</span><span class="chg">Changed · In progress → Done · 2/5 → 5/5</span></div><h3>Search</h3><p>Fuzzy titles and full-text index.</p><div class="prog"><div class="pl"><span>tasks</span><span>5/5</span></div><div class="bar"><i style="width:100%"></i></div></div><footer>#18 · #21</footer></article></div></section></div><aside><section class="card next"><h2>Next step</h2><p class="nt">Finish PDF export</p><p>2 files left; it does not depend on the sync decision.</p></section><section class="card decide"><h2>Needs your call</h2><ul><li><p class="q">Use the server clock for sync conflicts?</p><p class="d">by 10:00 → <b>keep local clocks, continue on PDF export</b></p></li></ul></section><section class="card changes"><h2>Changed since last update<span class="since">10-06 22:30</span></h2><ul><li><i class="dot-done"></i>Search: In progress → Done · 2/5 → 5/5</li><li><i class="dot-stuck"></i>Sync: In progress → Stuck</li><li><i class="dot-in_progress"></i>PDF export: 3/9 → 7/9</li><li><i class="dot-done"></i>Milestone Search: In progress → Done</li><li><i class="dot-done"></i>Milestone Public beta: Later → In progress</li><li><i class="dot-in_progress"></i>Next step: Finish PDF export</li></ul><h3>Recent commits</h3><ul class="commits"><li><span class="t">10-07 06:51</span> e099abf feat(export): PDF page breaks and headers</li><li><span class="t">10-07 05:12</span> 19dad4a wip(sync): conflict resolver needs server clock</li><li><span class="t">10-07 03:40</span> b66175f feat(search): full-text index with tokenizer</li><li><span class="t">10-07 01:15</span> b6b3035 feat(search): fuzzy title search</li><li><span class="t">10-06 21:40</span> 7ba80f4 feat(editor): live preview for tables</li></ul></section><section class="card"><h2>Uncertain / inferred</h2><ul class="plain"><li>PDF export tested on A4 only.</li></ul></section></aside></div><section class="details"><h2>Details</h2><details><summary><b>Open issues</b><span></span></summary><ul class="plain"><li>#27 sync conflict on simultaneous edits</li><li>#29 PDF footer overlaps</li></ul></details></section><footer class="foot"><p>Sources：README, ROADMAP.md, git log</p><p>Collector warnings：no GitHub origin: issues/PRs/CI skipped</p></footer></div>
-<script>var h=document.getElementById("here");if(h&&h.parentElement.scrollWidth>h.parentElement.clientWidth)h.parentElement.scrollLeft=h.offsetLeft-h.parentElement.clientWidth/2+60;</script>
+<body><div class="wrap"><div class="pin" id="pin" hidden><b>You are here</b> · <span>Server clock API</span> · <span>Finish PDF export</span> · <span>1 expiring</span> · <span>1 Not on the map</span></div><header><h1>lumen<span class="sub">Project map</span></h1><p class="summary">Local-first Markdown notes with sync and export.</p><p class="meta">Updated <b>10-07 07:12</b> · <b>1</b> commits since last · <b>2/6</b> done · <span class="stuck-dot"></span><b class="c-stuck">1 Stuck</b></p></header><div class="scrub"><span>Then</span><input type="range" id="scrub" min="0" max="1" value="1" aria-label="Changed since last update"><span>Now</span><span id="scrubcap"></span></div><section class="card track"><ol class="ms-list"><li class="ms ms-done" data-name="Editor core" data-now="done"><span class="dot"></span><span class="seg solid"></span><span class="ms-name">Editor core</span><span class="ms-note">Sep 21</span></li><li class="ms ms-done" data-name="Search" data-now="done"><span class="dot"></span><span class="seg solid"></span><span class="ms-name">Search</span><span class="ms-note">Oct 7</span></li><li class="ms ms-current" data-name="Public beta" data-now="current" id=here><span class="here">You are here</span><span class="dot"></span><span class="seg dotted"></span><span class="ms-name">Public beta</span><span class="ms-note">In progress · 3 left</span></li><li class="ms ms-future" data-name="Sync v2" data-now="future"><span class="dot"></span><span class="seg dotted"></span><span class="ms-name">Sync v2</span><span class="ms-note">Later</span></li><li class="ms ms-future" data-name="1.0" data-now="future"><span class="dot"></span><span class="ms-name">1.0</span><span class="ms-note">Later</span><span class="tag">proposed</span></li></ol><div class="left"><span class="big">3</span><span class="cap">Left for Public beta </span><div class="pills"><span class="pill p-in_progress linkable" data-link="export" role="button" tabindex="0"><i></i>PDF export<em>2 files</em></span><span class="pill p-stuck linkable" data-link="sync" role="button" tabindex="0"><i></i>Sync conflicts<em>server clock</em></span><span class="pill p-not_started linkable" data-link="onboarding" role="button" tabindex="0"><i></i>Onboarding</span></div></div></section><section class="card"><h2>Blockers to the next milestone</h2><div class="chain chain-default"><div class="node n-stuck is-bn linkable" data-link="sync" role="button" tabindex="0"><span class="bn">Bottleneck</span><b>Server clock API</b><span>your call</span></div><div class="arrow a-inferred" title="default keeps local clocks and continues PDF export"><p class="why-pop">default keeps local clocks and continues PDF export</p><span></span></div><div class="node n-in_progress linkable fork-only" data-link="export" role="button" tabindex="0"><b>PDF export</b><span>2 files left</span></div><div class="arrow a-inferred" title="onboarding demo exports a PDF"><p class="why-pop">onboarding demo exports a PDF</p><span></span></div><div class="node n-not_started linkable" data-link="onboarding" role="button" tabindex="0"><b>Onboarding</b><span>3 screens</span></div><div class="arrow a-evidence" title="ROADMAP.md: beta requires onboarding"><p class="why-pop">ROADMAP.md: beta requires onboarding</p><span></span></div><div class="node n-not_started linkable" role="button" tabindex="0"><b>Public beta</b><span>tag + release notes</span></div></div><p class="fork-label">If you override: block on the server clock first</p><div class="chain chain-alt"><div class="node n-stuck is-bn linkable fork-shared" data-link="sync" role="button" tabindex="0"><span class="bn">Bottleneck</span><b>Server clock API</b><span>your call</span></div><div class="arrow a-inferred" title="only if you choose to block on the server clock"><p class="why-pop">only if you choose to block on the server clock</p><span></span></div><div class="node n-not_started linkable fork-only" data-link="sync" role="button" tabindex="0"><b>Implement server clock</b><span>only if you block on it</span></div><div class="arrow a-evidence" title="`src/sync/conflict.ts` TODO: last-writer-wins needs a trusted server timestamp"><p class="why-pop"><code>src/sync/conflict.ts</code> TODO: last-writer-wins needs a trusted server timestamp</p><span></span></div><div class="node n-stuck linkable fork-only" data-link="sync" role="button" tabindex="0"><b>Sync conflicts</b><span>resolver waits on clock</span></div><div class="arrow a-inferred" title="onboarding waits until sync conflicts are decided"><p class="why-pop">onboarding waits until sync conflicts are decided</p><span></span></div><div class="node n-not_started linkable fork-shared" data-link="onboarding" role="button" tabindex="0"><b>Onboarding</b><span>3 screens</span></div><div class="arrow a-evidence" title="ROADMAP.md: beta requires onboarding"><p class="why-pop">ROADMAP.md: beta requires onboarding</p><span></span></div><div class="node n-not_started linkable fork-shared" role="button" tabindex="0"><b>Public beta</b><span>tag + release notes</span></div></div><div class="legend"><span><i class="lg-e"></i>Evidenced dependency</span><span><i class="lg-i"></i>Inferred order</span><span><i class="lg-b"></i>Bottleneck</span></div></section><div class="grid"><div class="main"><section><div class="sh"><h2>Parts</h2><span><b>2</b> / 6 done</span></div><div class="filters" role="toolbar"><button type="button" data-filter="all" aria-pressed="true">All</button><button type="button" data-filter="stuck" aria-pressed="false">Stuck <b>1</b></button><button type="button" data-filter="in_progress" aria-pressed="false">Moving <b>1</b></button><button type="button" data-filter="changed" aria-pressed="false">Changed <b>3</b></button><button type="button" data-filter="inferred" aria-pressed="false">Inferred <b>1</b></button></div><div class="unmap"><span class="tag">Not on the map</span><ul class="plain"><li><code>docs/scratch.md</code></li></ul></div><div class="parts"><article class="part pt-stuck changed linkable" data-link="sync" data-status="stuck" data-now="stuck" role="button" tabindex="0"><div class="ph"><span class="badge s-stuck">Stuck</span><span class="chg">Changed · In progress → Stuck</span></div><p class="eyebrow">Sync</p><h3>a decision on the server clock API</h3><p>Two-device sync works; conflicts don&#x27;t.</p><footer><button type="button" class="ev" data-kind="file" data-ref="src/sync/conflict.ts"><code>src/sync/conflict.ts</code></button><button type="button" class="ev" data-kind="issue" data-ref="27">#27</button></footer></article><article class="part pt-in_progress changed linkable" data-link="export" data-status="in_progress" data-now="in_progress" role="button" tabindex="0"><div class="ph"><span class="badge s-in_progress">In progress</span><span class="chg">Changed · 3/9 → 7/9</span></div><h3>PDF export</h3><p>Page breaks and headers done.</p><div class="prog"><div class="pl"><span>files</span><span>7/9</span></div><div class="bar"><i style="width:78%"></i></div></div><footer><button type="button" class="ev" data-kind="issue" data-ref="24">#24</button></footer></article><article class="part pt-not_started linkable" data-link="onboarding" data-status="not_started" data-now="not_started" role="button" tabindex="0"><div class="ph"><span class="badge s-not_started">Not started</span></div><h3>Onboarding</h3><p>Three intro screens.</p><footer><button type="button" class="ev" data-kind="file" data-ref="ROADMAP.md">ROADMAP.md</button></footer></article><article class="part pt-not_started linkable" data-link="themes" data-status="not_started" data-now="not_started" data-inferred role="button" tabindex="0"><div class="ph"><span class="badge s-not_started">Not started</span><span class="tag">inferred</span></div><h3>Themes</h3><p>After beta.</p><footer></footer></article><article class="part pt-done changed linkable" data-link="search" data-status="done" data-now="done" role="button" tabindex="0"><div class="ph"><span class="badge s-done">Done</span><span class="chg">Changed · In progress → Done · 2/5 → 5/5</span></div><h3>Search</h3><p>Fuzzy titles and full-text index.</p><div class="prog"><div class="pl"><span>tasks</span><span>5/5</span></div><div class="bar"><i style="width:100%"></i></div></div><footer><button type="button" class="ev" data-kind="issue" data-ref="18">#18</button><button type="button" class="ev" data-kind="issue" data-ref="21">#21</button></footer></article></div><details class="done-row"><summary>Done · 1</summary><div class="done-names"><button type="button" class="done-name" data-open="editor">Editor</button></div><div class="parts"><article class="part pt-done linkable" data-link="editor" data-status="done" data-now="done" role="button" tabindex="0"><div class="ph"><span class="badge s-done">Done</span></div><h3>Editor</h3><p>Markdown editing, tables, live preview.</p><footer><button type="button" class="ev" data-kind="file" data-ref="src/editor/"><code>src/editor/</code></button><button type="button" class="ev" data-kind="issue" data-ref="12">#12</button></footer></article></div></details></section></div><aside><section class="card next"><h2>Next step</h2><p class="nt">Finish PDF export</p><p>2 files left; it does not depend on the sync decision.</p></section><section class="card decide"><h2>Needs your call</h2><ul><li data-decision="clock"><p class="q">Use the server clock for sync conflicts?</p><p class="d">by <time data-deadline="2026-10-08T10:00:00+08:00">10-08 10:00</time> <span class="count"></span>→ <b class="def">keep local clocks, continue on PDF export</b></p><p class="taken">Default stands</p><div class="acts"><button type="button" class="act accept" data-copy="Decision: keep local clocks, continue on PDF export&#10;Question: Use the server clock for sync conflicts?">Accept default</button><button type="button" class="act altpath" data-fork="clock" data-option="1" data-show="Show the other path" data-hide="Hide the other path">Show the other path</button><button type="button" class="act override">Override</button><span class="copied">Copied</span></div><form class="override-form" hidden><input type="text" maxlength="240" aria-label="Override"><button type="submit">Copy</button></form><p class="hint">Copy, then paste back to the agent</p></li></ul></section><section class="card changes"><h2>Changed since last update<span class="since">10-06 22:30</span></h2><ul><li class="linkable" data-link="search" role="button" tabindex="0"><i class="dot-done"></i>Search: In progress → Done · 2/5 → 5/5</li><li class="linkable" data-link="sync" role="button" tabindex="0"><i class="dot-stuck"></i>Sync: In progress → Stuck</li><li class="linkable" data-link="export" role="button" tabindex="0"><i class="dot-in_progress"></i>PDF export: 3/9 → 7/9</li><li class=""><i class="dot-done"></i>Milestone Search: In progress → Done</li><li class=""><i class="dot-done"></i>Milestone Public beta: Later → In progress</li><li class=""><i class="dot-in_progress"></i>Next step: Finish PDF export</li></ul><h3>Recent commits</h3><ul class="commits"><li><span class="t">10-07 07:00</span> 0d1fec0 docs: scratch note</li></ul></section><section class="card"><h2>Uncertain / inferred</h2><ul class="plain"><li>PDF export tested on A4 only.</li></ul></section></aside></div><section class="details"><h2>Details</h2><details><summary><b>Open issues</b><span></span></summary><ul class="plain"><li>#27 sync conflict on simultaneous edits</li><li>#29 PDF footer overlaps</li></ul></details></section><footer class="foot"><p>Sources：README, ROADMAP.md, git log</p></footer><div id="peek" hidden role="dialog"><p id="peek-text"></p><a id="peek-link" target="_blank" rel="noopener" hidden></a></div></div>
+<script type="application/json" id="yah">{"slug": null, "peek": {"issues": {}, "commits": {"0d1fec0": "docs: scratch note"}, "prs": {}, "files": {"docs/scratch.md": "docs: scratch note"}}, "frames": [{"t": "2026-10-06T22:30:00+08:00", "label": "10-06 22:30", "parts": {"editor": {"status": "done", "done": null, "total": null}, "search": {"status": "in_progress", "done": 2, "total": 5}, "sync": {"status": "in_progress", "done": null, "total": null}, "export": {"status": "in_progress", "done": 3, "total": 9}, "onboarding": {"status": "not_started", "done": null, "total": null}, "themes": {"status": "not_started", "done": null, "total": null}}, "milestones": [{"name": "Editor core", "status": "done"}, {"name": "Search", "status": "current"}, {"name": "Public beta", "status": "future"}, {"name": "Sync v2", "status": "future"}, {"name": "1.0", "status": "future"}], "changes": []}, {"t": "2026-10-07T07:12:00+08:00", "label": "10-07 07:12", "parts": {"editor": {"status": "done", "done": null, "total": null}, "search": {"status": "done", "done": 5, "total": 5}, "sync": {"status": "stuck", "done": null, "total": null}, "export": {"status": "in_progress", "done": 7, "total": 9}, "onboarding": {"status": "not_started", "done": null, "total": null}, "themes": {"status": "not_started", "done": null, "total": null}}, "milestones": [{"name": "Editor core", "status": "done"}, {"name": "Search", "status": "done"}, {"name": "Public beta", "status": "current"}, {"name": "Sync v2", "status": "future"}, {"name": "1.0", "status": "future"}], "changes": ["Search: In progress → Done · 2/5 → 5/5", "Sync: In progress → Stuck", "PDF export: 3/9 → 7/9", "Milestone Search: In progress → Done", "Milestone Public beta: Later → In progress", "Next step: Finish PDF export"]}], "labels": {"expired": "Expired", "open": "Open on GitHub"}}</script>
+<script>
+(function () {
+  var raw = document.getElementById("yah");
+  var DATA = {};
+  try { DATA = JSON.parse(raw ? raw.textContent : "{}"); } catch (e) { DATA = {}; }
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var frames = DATA.frames || [];
+
+  function motion() { return reduce ? "auto" : "smooth"; }
+
+  var here = document.getElementById("here");
+  if (here && here.parentElement && here.parentElement.scrollWidth > here.parentElement.clientWidth) {
+    here.parentElement.scrollLeft = here.offsetLeft - here.parentElement.clientWidth / 2 + 60;
+  }
+
+  var pin = document.getElementById("pin");
+  if (here && pin && "IntersectionObserver" in window) {
+    new IntersectionObserver(function (entries) {
+      pin.hidden = entries[0].isIntersecting;
+    }, { threshold: 0.35 }).observe(here);
+  }
+
+  function setHist(el, status) {
+    if (!status) return;
+    el.setAttribute("data-hist", status);
+  }
+  function applyFrame(frame) {
+    if (!frame) return;
+    var cards = document.querySelectorAll(".part[data-link]");
+    for (var i = 0; i < cards.length; i++) {
+      var p = (frame.parts || {})[cards[i].getAttribute("data-link")];
+      setHist(cards[i], p ? p.status : cards[i].getAttribute("data-now"));
+    }
+    var ms = document.querySelectorAll(".ms[data-name]");
+    for (var j = 0; j < ms.length; j++) {
+      var name = ms[j].getAttribute("data-name");
+      var found = null;
+      var list = frame.milestones || [];
+      for (var k = 0; k < list.length; k++) if (list[k].name === name) found = list[k];
+      var st = found ? found.status : ms[j].getAttribute("data-now");
+      ms[j].classList.remove("ms-done", "ms-current", "ms-future");
+      if (st) ms[j].classList.add("ms-" + st);
+    }
+    var cap = document.getElementById("scrubcap");
+    if (cap) cap.textContent = frame.label || "";
+    var changes = document.querySelector(".changes ul");
+    if (changes && frame.changes && frame.changes.length && document.body.getAttribute("data-scrub") === "1") {
+      if (!changes.getAttribute("data-saved")) changes.setAttribute("data-saved", changes.innerHTML);
+      var html = "";
+      for (var c = 0; c < frame.changes.length; c++) {
+        html += '<li><i></i>' + frame.changes[c].replace(/[&<>]/g, function (ch) {
+          return ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : "&gt;";
+        }) + "</li>";
+      }
+      changes.innerHTML = html;
+    }
+  }
+  function restoreChanges() {
+    var changes = document.querySelector(".changes ul");
+    if (changes && changes.getAttribute("data-saved")) {
+      changes.innerHTML = changes.getAttribute("data-saved");
+      changes.removeAttribute("data-saved");
+    }
+  }
+  var scrub = document.getElementById("scrub");
+  if (scrub && frames.length >= 2) {
+    scrub.addEventListener("input", function () {
+      document.body.setAttribute("data-scrub", "1");
+      applyFrame(frames[Number(scrub.value)]);
+    });
+    scrub.addEventListener("change", function () {
+      scrub.value = String(frames.length - 1);
+      document.body.removeAttribute("data-scrub");
+      applyFrame(frames[frames.length - 1]);
+      restoreChanges();
+      var cap = document.getElementById("scrubcap");
+      if (cap) cap.textContent = "";
+    });
+  }
+  if (!reduce && frames.length >= 2) {
+    var a = Date.parse(frames[frames.length - 2].t || "");
+    var b = Date.parse(frames[frames.length - 1].t || "");
+    if (a && b && b - a > 6 * 3600 * 1000) {
+      applyFrame(frames[frames.length - 2]);
+      document.body.classList.add("replaying");
+      setTimeout(function () {
+        applyFrame(frames[frames.length - 1]);
+        document.body.classList.remove("replaying");
+      }, 1500);
+    }
+  }
+
+  function clearFocus() {
+    document.body.removeAttribute("data-focus");
+    var on = document.querySelectorAll(".linkable.on");
+    for (var i = 0; i < on.length; i++) on[i].classList.remove("on");
+  }
+  function focusLink(id, origin) {
+    if (!id) return;
+    if (document.body.getAttribute("data-focus") === id) { clearFocus(); return; }
+    document.body.setAttribute("data-focus", id);
+    var all = document.querySelectorAll(".linkable");
+    var card = null, node = null;
+    for (var i = 0; i < all.length; i++) {
+      var hit = all[i].getAttribute("data-link") === id;
+      all[i].classList.toggle("on", hit);
+      if (hit && all[i].classList.contains("part")) card = all[i];
+      if (hit && all[i].classList.contains("node")) node = all[i];
+    }
+    var dest = origin && origin.classList.contains("part") ? node : card;
+    if (card) {
+      var box = card.closest("details");
+      if (box) box.open = true;
+    }
+    if (dest && dest.scrollIntoView) dest.scrollIntoView({ block: "nearest", behavior: motion() });
+    if (origin && origin.classList.contains("is-bn") && card) {
+      var ev = card.querySelector(".ev");
+      if (ev) openPeek(ev);
+    }
+  }
+
+  var peek = document.getElementById("peek");
+  function openPeek(btn) {
+    if (!peek) return;
+    var kind = btn.getAttribute("data-kind");
+    var ref = btn.getAttribute("data-ref");
+    var db = DATA.peek || {};
+    var text = ref;
+    var href = "";
+    if (kind === "issue") {
+      text = (db.issues && db.issues[ref]) || (db.prs && db.prs[ref]) || ("#" + ref);
+      if (db.issues && db.issues[ref]) text = "#" + ref + " " + db.issues[ref];
+      else if (db.prs && db.prs[ref]) text = "#" + ref + " " + db.prs[ref];
+      if (DATA.slug) href = "https://github.com/" + DATA.slug + "/issues/" + ref;
+    } else if (kind === "commit") {
+      text = (db.commits && db.commits[ref]) ? (ref + " " + db.commits[ref]) : ref;
+      if (DATA.slug) href = "https://github.com/" + DATA.slug + "/commit/" + ref;
+    } else {
+      text = ref;
+      var files = db.files || {};
+      if (files[ref]) text = ref + " — " + files[ref];
+      else {
+        for (var path in files) {
+          if (files.hasOwnProperty(path) && (path.indexOf(ref) === 0 || ref.indexOf(path) === 0)) {
+            text = ref + " — " + files[path];
+            break;
+          }
+        }
+      }
+    }
+    document.getElementById("peek-text").textContent = text;
+    var link = document.getElementById("peek-link");
+    if (href) { link.hidden = false; link.href = href; link.textContent = (DATA.labels && DATA.labels.open) || "Open"; }
+    else link.hidden = true;
+    peek.hidden = false;
+    var box = btn.getBoundingClientRect();
+    peek.style.top = Math.max(8, Math.min(box.bottom + 6, window.innerHeight - 110)) + "px";
+    peek.style.left = Math.max(8, Math.min(box.left, window.innerWidth - 290)) + "px";
+  }
+
+  function copyText(text, li) {
+    function ok() { if (li) li.classList.add("copied-on"); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok, function () { fallback(); });
+    } else fallback();
+    function fallback() {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); ok(); } catch (e) {}
+      ta.parentNode.removeChild(ta);
+    }
+  }
+
+  function tick() {
+    var nodes = document.querySelectorAll("time[data-deadline]");
+    var now = Date.now();
+    for (var i = 0; i < nodes.length; i++) {
+      var t = Date.parse(nodes[i].getAttribute("data-deadline"));
+      var count = nodes[i].parentNode.querySelector(".count");
+      var li = nodes[i].closest("li");
+      if (!t || !count) continue;
+      var delta = t - now;
+      if (delta <= 0) {
+        count.textContent = (DATA.labels && DATA.labels.expired) || "";
+        if (li) li.classList.add("expired");
+      } else {
+        var mins = Math.round(delta / 60000);
+        var h = Math.floor(mins / 60);
+        var m = mins % 60;
+        count.textContent = (h ? h + "h " : "") + m + "m ";
+      }
+    }
+  }
+  tick();
+  setInterval(tick, 30000);
+
+  document.body.addEventListener("click", function (ev) {
+    var arrow = ev.target.closest ? ev.target.closest(".arrow") : null;
+    if (arrow) {
+      ev.stopPropagation();
+      var open = document.querySelectorAll(".arrow.open");
+      for (var i = 0; i < open.length; i++) if (open[i] !== arrow) open[i].classList.remove("open");
+      arrow.classList.toggle("open");
+      return;
+    }
+    var evidence = ev.target.closest ? ev.target.closest(".ev") : null;
+    if (evidence) { ev.stopPropagation(); openPeek(evidence); return; }
+    var filter = ev.target.closest ? ev.target.closest("[data-filter]") : null;
+    if (filter) {
+      var name = filter.getAttribute("data-filter");
+      var buttons = document.querySelectorAll("[data-filter]");
+      for (var f = 0; f < buttons.length; f++) buttons[f].setAttribute("aria-pressed", buttons[f] === filter ? "true" : "false");
+      if (name === "all") document.body.removeAttribute("data-filter");
+      else document.body.setAttribute("data-filter", name);
+      return;
+    }
+    var accept = ev.target.closest ? ev.target.closest(".accept") : null;
+    if (accept) {
+      ev.stopPropagation();
+      copyText(accept.getAttribute("data-copy") || "", accept.closest("li"));
+      return;
+    }
+    var over = ev.target.closest ? ev.target.closest(".override") : null;
+    if (over && over.tagName === "BUTTON") {
+      ev.stopPropagation();
+      var form = over.parentNode.parentNode.querySelector(".override-form");
+      if (form) form.hidden = !form.hidden;
+      return;
+    }
+    var alt = ev.target.closest ? ev.target.closest(".altpath") : null;
+    if (alt) {
+      ev.stopPropagation();
+      var id = alt.getAttribute("data-fork");
+      if (document.body.getAttribute("data-fork") === id) {
+        document.body.removeAttribute("data-fork");
+        alt.textContent = alt.getAttribute("data-show");
+      } else {
+        document.body.setAttribute("data-fork", id);
+        alt.textContent = alt.getAttribute("data-hide");
+      }
+      return;
+    }
+    var nameBtn = ev.target.closest ? ev.target.closest(".done-name") : null;
+    if (nameBtn) {
+      ev.stopPropagation();
+      var box = nameBtn.closest("details");
+      if (box) box.open = true;
+      focusLink(nameBtn.getAttribute("data-open"), null);
+      return;
+    }
+    if (peek && !peek.hidden && !(ev.target.closest && ev.target.closest("#peek"))) peek.hidden = true;
+    var link = ev.target.closest ? ev.target.closest("[data-link]") : null;
+    if (link) focusLink(link.getAttribute("data-link"), link);
+  });
+
+  document.body.addEventListener("submit", function (ev) {
+    var form = ev.target;
+    if (!form.classList || !form.classList.contains("override-form")) return;
+    ev.preventDefault();
+    var input = form.querySelector("input");
+    var text = input ? input.value.replace(/^\s+|\s+$/g, "") : "";
+    if (!text) return;
+    var li = form.closest("li");
+    var q = li ? (li.querySelector(".q").textContent || "") : "";
+    copyText("Decision: " + text + "\nQuestion: " + q, li);
+  });
+
+  document.body.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    var link = ev.target.closest ? ev.target.closest("[data-link]") : null;
+    if (!link || ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "BUTTON") return;
+    ev.preventDefault();
+    focusLink(link.getAttribute("data-link"), link);
+  });
+})();
+</script>
 </body></html>

@@ -145,6 +145,20 @@ class Baseline(unittest.TestCase):
             self.assertEqual((g["head"], g["commits"]), (None, []))
 
 
+RICH = copy.deepcopy(MAP)  # every optional field the page uses, for the fuzz test
+RICH["decisions"] = [{"id": "ship", "question": "ship?", "default": "no", "options": ["no", "yes"],
+                      "deadline": "2026-10-08T10:00:00+08:00", "reversible": True, "proposed": True},
+                     {"question": "merge?", "default": "wait"}]
+RICH["chain"]["nodes"][0]["part"] = "core"
+RICH["chain"]["nodes"].append({"id": "alt", "label": "hold", "status": "not_started",
+                               "if": {"decision": "ship", "option": 1}, "part": "docs"})
+RICH["remaining"][0]["part"] = "core"
+RICH["panels"] = [{"title": "t", "kind": "table", "columns": ["a"], "rows": [["1"]]},
+                  {"title": "l", "kind": "list", "items": ["x"]}, {"title": "x", "kind": "text", "text": "y"}]
+RICH["uncertain"] = ["u"]
+RICH["sources"] = ["git log"]
+
+
 class Safety(unittest.TestCase):
     def test_chain_status_injection_rejected_and_escaped(self):
         m = copy.deepcopy(MAP)
@@ -176,9 +190,10 @@ class Safety(unittest.TestCase):
             elif isinstance(o, list):
                 for i, v in enumerate(o):
                     walk(v, p + [i])
-        walk(MAP, [])
-        for _ in range(600):
-            m = copy.deepcopy(MAP)
+        walk(RICH, [])
+        self.assertEqual(pmap.validate(RICH), [])
+        for _ in range(1500):
+            m = copy.deepcopy(RICH)
             p = rnd.choice(paths[1:])
             o = m
             for k in p[:-1]:
@@ -187,9 +202,10 @@ class Safety(unittest.TestCase):
             if pmap.validate(m):
                 continue
             try:
-                pmap.render_html(m, None, {}, [], dict(pmap.DEFAULT_STYLE), None)
-                pmap.diff_maps(MAP, m)
-                pmap.diff_maps(m, MAP)
+                frames = [pmap.frame_from(RICH), pmap.frame_from(m)]
+                pmap.render_html(m, None, {}, [], dict(pmap.DEFAULT_STYLE), None, frames)
+                pmap.diff_maps(RICH, m)
+                pmap.diff_maps(m, RICH)
             except Exception as e:  # noqa: BLE001
                 self.fail(f"validate passed but render crashed at {p}: {e!r}")
 

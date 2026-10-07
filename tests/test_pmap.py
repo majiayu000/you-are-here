@@ -40,7 +40,7 @@ MAP = {
                "paths": ["src"]},
               {"id": "docs", "name": "Docs", "status": "not_started", "inferred": True, "paths": ["docs"]}],
     "next_step": {"title": "finish parser", "why": "blocks release"},
-    "decisions": [{"question": "ship?", "default": "no", "deadline": "10-08 10:00"}],
+    "decisions": [{"question": "ship?", "default": "no", "deadline": "10-08 10:00", "reversible": True}],
 }
 
 
@@ -99,7 +99,7 @@ class PmapTest(unittest.TestCase):
         r = self.pmap("render")
         self.assertIn("changes since last render: 1", r.stdout)
         page = read(os.path.join(self.out, "index.html"))
-        self.assertIn('class="part pt-done changed"', page)
+        self.assertIn('class="part pt-done changed linkable"', page)
         self.assertIn("0/4 → 4/4", page)
 
     def test_status(self):
@@ -169,6 +169,77 @@ class PmapTest(unittest.TestCase):
         r = self.pmap("render", check=False)
         self.assertEqual(r.returncode, 1)
         for frag in ("waiting_on", "evidence[] or mark inferred", "exactly one", "edges[0].why"):
+            self.assertIn(frag, r.stdout)
+
+    def test_page_interactions(self):
+        self.pmap("collect", "--no-gh")
+        m = json.loads(json.dumps(MAP))
+        m["parts"][0].update(status="stuck", waiting_on="the parser")
+        m["parts"][1].update(status="done")
+        m["decisions"] = [{
+            "id": "ship", "question": "ship?", "default": "no",
+            "options": ["no", "yes"], "deadline": "2026-10-08T10:00:00+08:00", "reversible": True,
+        }]
+        m["chain"]["nodes"][0]["part"] = "core"
+        m["chain"]["nodes"].append({
+            "id": "alt", "label": "hold", "status": "not_started",
+            "if": {"decision": "ship", "option": 1}, "part": "docs",
+        })
+        m["remaining"][0]["part"] = "core"
+        self.write_map(m)
+        facts = json.loads(read(os.path.join(self.out, "facts.json")))
+        facts["delta"] = {"unmapped_files": ["notes/x.md"], "touched_parts": {}, "worktree_changed": [],
+                          "untouched_parts": []}
+        put(os.path.join(self.out, "facts.json"), json.dumps(facts))
+        self.pmap("render")
+        page = read(os.path.join(self.out, "index.html"))
+        self.assertIn('data-link="core"', page)
+        self.assertIn('data-filter="changed"', page)
+        self.assertIn('class="act accept"', page)
+        self.assertIn('id="pin"', page)
+        self.assertIn("notes/x.md", page)
+        self.assertIn("chain-alt", page)
+        self.assertIn("prefers-reduced-motion", page)
+        self.assertIn("<h3>the parser</h3>", page)
+        self.assertIn('class="done-row"', page)
+        self.assertIn('data-kind="file"', page)
+        self.assertRegex(page, r'<time data-deadline="2026-10-08T10:00:00\+08:00">10-08 \d\d:00</time>')  # local time
+        m["parts"][1]["status"] = "in_progress"  # a second, different snapshot in the same second
+        self.write_map(m)
+        self.pmap("render")
+        page = read(os.path.join(self.out, "index.html"))
+        self.assertIn('id="scrub"', page)
+
+    def test_irreversible_decision_waits(self):
+        self.pmap("collect", "--no-gh")
+        m = json.loads(json.dumps(MAP))
+        m["decisions"] = [{"question": "merge #140?", "default": "merge", "deadline": "10:00"}]
+        self.write_map(m)
+        r = self.pmap("render", check=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("only for reversible choices", r.stdout)
+        m["decisions"][0].pop("deadline")
+        self.write_map(m)
+        self.pmap("render")
+        self.assertIn('class="tag waits"', read(os.path.join(self.out, "index.html")))
+
+    def test_identical_snapshots_collapse(self):
+        self.pmap("collect", "--no-gh")
+        self.write_map(MAP)
+        self.pmap("render")
+        self.pmap("render")
+        self.assertNotIn('id="scrub"', read(os.path.join(self.out, "index.html")))
+
+    def test_fork_validation(self):
+        self.pmap("collect", "--no-gh")
+        bad = json.loads(json.dumps(MAP))
+        bad["decisions"] = [{"id": "ship", "question": "ship?", "default": "maybe", "options": ["no", "yes"]}]
+        bad["chain"]["nodes"][0]["if"] = {"decision": "ship", "option": 3}
+        bad["chain"]["nodes"][0]["part"] = "missing"
+        self.write_map(bad)
+        r = self.pmap("render", check=False)
+        self.assertEqual(r.returncode, 1)
+        for frag in ("must be one of options", "out of range", "unknown part id"):
             self.assertIn(frag, r.stdout)
 
     def test_style_persists(self):

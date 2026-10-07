@@ -10,6 +10,10 @@
 - the next step, and decisions that wait for you, each with a default;
 - what changed since the last map.
 
+The page itself is the morning view: click any piece of the same work and the rest lights up,
+filter to what changed or what is stuck, accept or override a decision (it copies one line you
+can paste back), and scrub back through the night. A long gap replays in about a second and a half.
+
 ![A project map for a fictional notes app](docs/screenshot.png)
 
 <sub>Demo data from a fictional project. Rebuild it with `python3 docs/demo/build.py`.</sub>

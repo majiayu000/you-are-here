@@ -15,13 +15,14 @@ milestones use `done | current | future` (exactly one `current`).
     { "name": "M0", "status": "future", "note": "baseline" }
   ],
   "remaining": [                                    // what is left before the current milestone
-    { "label": "Merge PR #140", "status": "in_progress", "note": "CI green" },
+    { "label": "Merge PR #140", "status": "in_progress", "note": "CI green", "part": "ledger" },
     { "label": "main CI green", "status": "stuck" }
   ],
 
   "chain": {                                        // blocker chain toward the current milestone
     "nodes": [                                      // ORDER = the main path, drawn left → right
-      { "id": "pr140", "label": "Merge PR #140", "sub": "awaiting review", "status": "in_progress", "bottleneck": true },
+      { "id": "pr140", "label": "Merge PR #140", "sub": "awaiting review", "status": "in_progress", "bottleneck": true, "part": "ledger" },
+      { "id": "hold", "label": "Hold the release", "status": "not_started", "if": { "decision": "ship", "option": 1 } },
       { "id": "ci", "label": "main CI green", "sub": "1 failing test", "status": "stuck" }
     ],
     "edges": [                                      // edges between neighbours become arrows; others are listed as "other dependencies"
@@ -45,7 +46,10 @@ milestones use `done | current | future` (exactly one `current`).
 
   "next_step": { "title": "Review and merge PR #140", "why": "it unblocks main CI and the round-5 PR" },
   "decisions": [
-    { "question": "Ship round 5 as default?", "default": "yes, as in round 5", "deadline": "10-08 10:00", "proposed": true }
+    { "id": "ship", "question": "Ship round 5 as default?", "default": "yes, as in round 5",
+      "options": ["yes, as in round 5", "hold for the failing test"],
+      "deadline": "10-08 10:00", "reversible": true, "proposed": true },
+    { "question": "Merge #140 without review?", "default": "wait for review" }   // no deadline: waits for the user
   ],
   "uncertain": ["things you could not verify; inferences that affect the conclusion"],
 
@@ -67,3 +71,12 @@ Validation rules worth knowing:
 - evidence edges need `why`
 - `progress.total` > 0; omit `progress` when there is no real count (no made-up percentages)
 - part `id`s are unique and should stay the same across runs
+- `part` on a chain node or remaining item is a part id. The page uses it to light the same work everywhere you click
+- `decisions[].options` lists real choices. `default` must be one of them. `id` is required only when a chain node's `if` points at the decision
+- `if.option` is the index into that decision's `options`. Nodes without `if` stay on every path. The page draws the default path, and the other path when asked
+- `deadline` means "if nobody answers, the default goes ahead". Only reversible, local choices may have one, so a
+  deadline requires `"reversible": true`. Anything outward-facing or hard to undo (push, publish, merge, delete,
+  spend) gets no deadline and shows as waiting for the user
+- `deadline` may be an ISO timestamp, `MM-DD HH:MM`, or `HH:MM` (on the map's date). The page counts it down and marks the default once it has passed
+
+The page also filters parts, collapses unchanged done cards, peeks evidence without leaving, copies a decision as text to paste back to the agent, and scrubs the `history/` snapshots. None of that needs extra fields.
