@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-PMAP = os.path.join(os.path.dirname(__file__), "..", "scripts", "pmap.py")
+PMAP = os.path.join(os.path.dirname(__file__), "..", "plugins", "you-are-here", "skills", "you-are-here", "scripts", "pmap.py")
 
 
 def put(path, text, mode="w"):

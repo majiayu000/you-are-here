@@ -11,8 +11,9 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PMAP = os.path.join(ROOT, "scripts", "pmap.py")
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+SCRIPTS = os.path.join(ROOT, "plugins", "you-are-here", "skills", "you-are-here", "scripts")
+PMAP = os.path.join(SCRIPTS, "pmap.py")
+sys.path.insert(0, SCRIPTS)
 sys.path.insert(0, HERE)
 import pmap  # noqa: E402
 from test_pmap import MAP, put, read, sh  # noqa: E402
@@ -286,7 +287,7 @@ class Installer(unittest.TestCase):
             import tomllib
         except ImportError:
             self.skipTest("tomllib needs Python 3.11+")
-        text = read(os.path.join(ROOT, "agents", "codex.toml")).replace("{{SKILL_DIR}}", r"C:\Users\me\skills\you-are-here")
+        text = read(os.path.join(ROOT, "plugins", "you-are-here", "codex", "you-are-here.toml")).replace("{{SKILL_DIR}}", r"C:\Users\me\skills\you-are-here")
         self.assertIn(r"C:\Users", tomllib.loads(text)["developer_instructions"])
 
     def test_broken_markers_stop_the_installer(self):

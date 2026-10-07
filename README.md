@@ -2,100 +2,156 @@
 
 > Let your coding agent work overnight. In the morning, open one page and see where the project is.
 
-`you-are-here` is an agent skill that draws a one-file HTML map of a git project:
+`you-are-here` is a plugin for **Claude Code, Codex and Grok** that keeps a one-file HTML map of
+a git project:
 
-- a milestone track with a "you are here" marker;
-- the blocker chain to the next milestone;
-- a status card for each part of the project;
-- the next step, and decisions that wait for you, each with a default;
-- what changed since the last map.
-
-The page itself is the morning view: click any piece of the same work and the rest lights up,
-filter to what changed or what is stuck, accept or override a decision (it copies one line you
-can paste back), and scrub back through the night. A long gap replays in about a second and a half.
+- one sentence on what changed since the last map, plus counts of what got better, what got worse
+  and what needs you;
+- a milestone track with a **you are here** marker, and the blocker chain to the next milestone
+  with the bottleneck marked;
+- a card per part of the project: done, in progress, stuck (and what it waits on), not started;
+- the next step, who does it (you or the agent), how, and what it unblocks;
+- decisions that wait for you, each with a default you can accept or override;
+- a slider to replay the night, filters, and links back to the PRs, commits and files behind
+  every claim.
 
 ![A project map for a fictional notes app](docs/screenshot.png)
 
 <sub>Demo data from a fictional project. Rebuild it with `python3 docs/demo/build.py`.</sub>
 
-It works with any agent that reads `SKILL.md` and can run shell commands. Claude Code and Codex CLI
-have drawn maps with it end to end. Grok CLI loads it, but on a machine whose Claude hooks reject
-Grok's shell tool (Grok runs Claude hooks by default), its shell commands are denied. See Troubleshooting.
-
-## How it is split
-
-| Who | Does what |
-|-----|-----------|
-| `scripts/pmap.py` (Python 3.8+, stdlib only) | collects git / GitHub facts, computes the delta since the last map, validates `map.json`, diffs against the previous map, renders the HTML |
-| the agent | decides the parts, statuses, milestones and blocker chain, and writes `map.json` ([schema](references/schema.md)) |
-
-The fixed page structure keeps maps consistent across agents and runs. Incremental mode keeps
-updates cheap. `collect` compares against the last rendered map and reports a delta:
-- new commits and uncommitted edits, mapped onto each part's `paths`;
-- PRs opened, merged or changed, issues, and new CI runs.
-
-The agent only re-checks what the delta names. `render` lists what changed: part status and
-progress, milestones, the bottleneck, chain nodes, remaining items and the next step.
+The page is a single file with no network access: double-click it, or keep it open and refresh.
 
 ## Install
 
-```sh
-python3 install.py --dry-run --all   # show what would change
-python3 install.py --all             # skills + background subagents + automation rules
-python3 install.py                   # skills only
-python3 install.py --uninstall       # remove everything it installed
+### Claude Code
+
+```text
+/plugin marketplace add majiayu000/you-are-here
+/plugin install you-are-here@you-are-here
 ```
 
-| Part | Claude Code | Codex | Grok |
-|------|-------------|-------|------|
-| skill (symlink) | `~/.claude/skills/you-are-here` | `~/.codex/skills/you-are-here` | `~/.agents/skills/you-are-here` |
-| background subagent | `~/.claude/agents/you-are-here.md` (always background, effort medium, skill preloaded) | `~/.codex/agents/you-are-here.toml` (effort medium) | `~/.grok/agents/you-are-here.md` |
-| automation rule | `~/.claude/rules/you-are-here.md` | marked block in `~/.codex/AGENTS.md` (backed up first) | reads `~/.claude/rules` via Claude compat |
+### Codex
 
-The installer only touches its own files: symlinks to this folder, files carrying its marker, and
-the marked block in `AGENTS.md`. It skips anything else that already exists.
+```sh
+codex plugin marketplace add majiayu000/you-are-here
+codex plugin add you-are-here@you-are-here
+```
+
+Then open `/hooks` in Codex once and trust the you-are-here hooks. Codex plugins can't ship
+subagents, so add the background subagent from a checkout:
+
+```sh
+git clone https://github.com/majiayu000/you-are-here && python3 you-are-here/install.py --codex-agent
+```
+
+### Grok
+
+```sh
+grok plugin marketplace add majiayu000/you-are-here
+grok plugin install you-are-here --trust
+```
+
+### Skill only
+
+To use only the skill, without hooks or the subagent, link
+`plugins/you-are-here/skills/you-are-here` into your agent's skills folder, or run
+`python3 install.py`.
 
 ## Use
 
-Ask your agent for a project map, for example "draw a project map for this repo" or
-`/you-are-here`. Output goes to `<repo>/.project-map/index.html`. That folder ignores itself, so
-the repo's own `.gitignore` is untouched.
+Talk to your agent:
 
-Manual use:
+- "Draw a project map for this repo" / "画个项目地图": draws the first map into
+  `.project-map/index.html`. That folder ignores itself, so the repo's `.gitignore` is untouched.
+- "Where are we?" / "进度到哪了": the agent answers from the map, and refreshes it first when it is
+  out of date.
+- "Keep working on this overnight": the agent draws the map first and offers to turn on automatic
+  refreshes.
+
+Automatic refreshes are off until you turn them on for a repo:
 
 ```sh
-python3 scripts/pmap.py style --theme dark --accent '#2dd4bf' --lang zh   # once per machine
-python3 scripts/pmap.py collect /path/to/repo      # -> .project-map/facts.json
-# agent (or you) writes .project-map/map.json
-python3 scripts/pmap.py render /path/to/repo       # -> .project-map/index.html
-python3 scripts/pmap.py status /path/to/repo       # none | fresh | stale
+python3 <plugin>/skills/you-are-here/scripts/pmap.py auto on .   # or ask the agent to do it
 ```
 
-The style is stored in `~/.config/you-are-here/style.json` and shared by every agent.
+## How it stays up to date
 
-## Background and automation
+| When | What the plugin does |
+|------|----------------------|
+| A session starts | Gives the agent a few lines from the map: headline, bottleneck, next step, open decisions, and whether the map is stale |
+| You ask "where are we?" | Tells the agent to answer from the map, or to refresh it first |
+| You start a long unattended run | Tells the agent to draw or refresh the map and offer `auto on` |
+| After `git commit`, `git tag`, `git push`, `gh pr merge` or `gh release create` | Checks whether the map is stale. With auto on, it starts a background refresh; otherwise it nudges the agent once |
+| At the end of each turn | With auto on and a stale map, starts a background refresh |
 
-The rule (`rules/you-are-here.md`) tells the agent to:
+"Stale" is decided by git alone, with no network and no model: new commits, a new tag, or edited
+files since the last map.
 
-- start the `you-are-here` subagent in the background before a long unattended run;
-- after each milestone, run `pmap.py status`. It is git-only, needs no network or model, and prints
-  `none`, `fresh` or `stale`. Re-draw the map in the background when it is stale;
-- answer "where are we?" from `map.json` when the map is fresh;
-- put choices that need you into `decisions` with a default and a deadline, and go ahead with the
-  default only for reversible, local choices.
+A background refresh runs the same agent you are using, headless and detached: `claude -p`,
+`codex exec` or `grok -p`. It is limited to one at a time per repo and to one every 20 minutes
+(`auto on --every 30` changes that). It writes only inside `.project-map/` and logs to
+`.project-map/bg.log`. In Claude Code and Grok you can also start the `you-are-here` subagent in
+the background from inside a session.
+
+## Rules the map follows
+
+The same rules apply in every agent, so maps from Claude, Codex and Grok look and read the same.
+
+- The repo is read-only. The plugin and the agent write only `.project-map/`.
+- Every claim on a card links to evidence (a PR, a commit, a file, a CI run) or is marked
+  *inferred*. Milestones the repo doesn't define are marked *proposed*.
+- **Done** means merged with nothing left to verify. The **bottleneck** is the earliest unfinished
+  step on the path to the next milestone, which is not always the stuck one.
+- A decision only goes ahead on its own when it is reversible and local, and it shows a countdown.
+  Merges, pushes, releases, deletions and spending always wait for you.
+- If a hook or permission policy blocks a command, the agent stops and reports it. It never edits
+  hook or permission settings to get around a block.
+
+## What reads into the map
+
+- git: commits (including the upstream branch), tags, branches, and uncommitted edits;
+- GitHub (optional, through `gh`, read-only): open issues, open PRs with their checks and review
+  state, and CI runs on the default branch;
+- plan files the project already keeps: spec-kit and Kiro `tasks.md`, Taskmaster `tasks.json`,
+  Codex ExecPlans (`PLANS.md`), and checklists in `TODO.md` or `ROADMAP.md`.
+
+`scripts/pmap.py` (Python 3.8+, stdlib only) collects these facts, diffs them against the last map,
+validates what the agent writes and renders the page. The agent supplies the judgment: what the
+parts are, where they stand, and what blocks what.
+
+## Compared with
+
+| | you-are-here | [project-artifact](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/project-artifact) | Taskmaster / spec-kit | Agent dashboards (Agent View, `/goal`) |
+|---|---|---|---|---|
+| Shows | where the **project** is | where the project is | the task list | what the **agent session** is doing |
+| Agents | Claude Code, Codex, Grok | Claude Code | many | one each |
+| Output | local single HTML file | page on claude.ai (needs login) | JSON / Markdown | in-app view |
+| Updates during unattended runs | yes (hooks, background refresh) | when asked | when the agent edits tasks | live |
+| Decisions with defaults | yes, reversible only | no | no | no |
+| Diff since the last map | yes, on the page | summary in chat | no | no |
+
+you-are-here reads Taskmaster and spec-kit task files when a project has them; it is a view over
+those plans, not a replacement for them.
 
 ## Troubleshooting
 
 - **Grok: "Hook denied: … accepts Bash hook events only".** Grok runs Claude Code hooks by default
   (`[compat.claude] hooks`). A Claude hook that only understands Claude's `Bash` tool then rejects
-  Grok's shell tool. Fix the hook or its Grok adapter, or turn off `compat.claude.hooks` for Grok.
-  The skill tells agents to stop and report this and never to edit hook config themselves.
+  Grok's shell tool. Fix that hook, or turn off `compat.claude.hooks` for Grok. you-are-here tells
+  agents to stop and report this, never to edit hook config.
+- **Background refresh did nothing.** Read `.project-map/bg.log`. Refreshes run only after
+  `pmap.py auto on`, only when `pmap.py status` says `stale`, and at most once per interval.
+- **Debugging hooks.** Set `YAH_DEBUG=1` to log what each hook received and returned to
+  `~/.cache/you-are-here/hook.log`.
 
-## Tests
+## Development
 
 ```sh
-python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests   # 40+ tests, including fake agent CLIs for the hooks
+python3 docs/demo/build.py              # rebuild the demo page and screenshot
 ```
+
+Inspired by [@Voxyz_ai's project-map subagent idea](https://x.com/Voxyz_ai/status/2107455844992299272).
 
 ## License
 

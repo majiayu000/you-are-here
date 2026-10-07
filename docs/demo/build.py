@@ -15,7 +15,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-PMAP = os.path.join(ROOT, "scripts", "pmap.py")
+PMAP = os.path.join(ROOT, "plugins", "you-are-here", "skills", "you-are-here", "scripts", "pmap.py")
 CHROME = [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     shutil.which("google-chrome") or "", shutil.which("chromium") or "",
@@ -33,6 +33,7 @@ MORNING = {
     "project": {"name": "lumen", "summary": "Local-first Markdown notes with sync and export."},
     "style": {"lang": "en", "theme": "dark", "accent": "#2dd4bf"},
     "generated_at": "2026-10-07T07:12:00+08:00",
+    "headline": "Search shipped overnight and PDF export is nearly done; sync is stuck on your server-clock call.",
     "milestones": [
         {"name": "Editor core", "status": "done", "date": "Sep 21"},
         {"name": "Search", "status": "done", "date": "Oct 7"},
@@ -82,7 +83,8 @@ MORNING = {
         {"id": "themes", "name": "Themes", "status": "not_started", "summary": "After beta.", "inferred": True,
          "paths": ["src/themes"]},
     ],
-    "next_step": {"title": "Finish PDF export", "why": "2 files left; it does not depend on the sync decision."},
+    "next_step": {"title": "Finish PDF export", "owner": "agent", "why": "It does not depend on the sync decision.",
+                  "action": "`src/export/pdf.ts` page footers, then `src/export/fonts.ts`", "unblocks": "Onboarding demo"},
     "decisions": [
         {"id": "clock", "question": "Use the server clock for sync conflicts?",
          "default": "keep local clocks, continue on PDF export",
@@ -107,7 +109,8 @@ def evening():
     parts["sync"].update(status="in_progress")
     parts["sync"].pop("waiting_on")
     parts["export"]["progress"] = {"done": 3, "total": 9, "label": "files"}
-    m["next_step"] = {"title": "Finish full-text search", "why": "blocks beta"}
+    m["next_step"] = {"title": "Finish full-text search", "owner": "agent", "why": "blocks beta"}
+    m["headline"] = "Search is half done; sync and export are moving."
     return m
 
 

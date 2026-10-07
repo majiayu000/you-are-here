@@ -1,0 +1,20 @@
+{
+  "name": "you-are-here",
+  "interface": {
+    "displayName": "You Are Here"
+  },
+  "plugins": [
+    {
+      "name": "you-are-here",
+      "source": {
+        "source": "local",
+        "path": "./plugins/you-are-here"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

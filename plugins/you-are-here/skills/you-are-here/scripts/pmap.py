@@ -7,6 +7,8 @@ Agent-neutral (Claude Code, Codex, Grok, ...). Python 3.8+ stdlib only.
   pmap.py validate <repo> [--out DIR]             -> check DIR/map.json against the schema
   pmap.py render   <repo> [--out DIR]             -> DIR/index.html, diffed against the last render
   pmap.py status   <repo> [--out DIR] [--json]    -> none | fresh | stale (git only, no network)
+  pmap.py auto     [on|off] <repo> [--every MIN]  -> background refreshes from the plugin hooks
+  pmap.py summary  <repo>                         -> a few lines about the map, for hooks
   pmap.py style    [--theme dark|light|auto] [--accent '#2dd4bf'] [--lang zh|en]
 
 DIR defaults to <repo>/.project-map (self-ignored via its own .gitignore).
@@ -2030,48 +2032,123 @@ def render(repo, d):
     print(f"html: {os.path.join(d, 'index.html')}")
 
 
-def cmd_status(a):
-    """Cheap staleness check (git only, no network, no model): none | fresh | stale."""
-    repo = repo_root(a.repo)
-    d = os.path.abspath(a.out) if a.out else os.path.join(repo, ".project-map")
+def staleness(repo, d, commits_at=5, hours=12, files_at=8):
+    """Cheap staleness check (git only, no network, no model): status none | fresh | stale."""
     state = load_json(os.path.join(d, "state.json"), {}) or {}
     since = state.get("last_render")
     res = {"repo": repo, "map": os.path.join(d, "index.html"), "last_render": since}
     if not since or not os.path.exists(os.path.join(d, "map.json")):
         res.update(status="none", reason="no map yet")
-    else:
-        baseline = load_json(os.path.join(d, "baseline.json"), {}) or {}
-        rng = new_commit_range(repo, baseline, state, [])
-        ok, out = git(repo, "rev-list", "--count", *(rng or ["HEAD", "--not", "HEAD"])) if rng else (True, "0")
-        if rng and rng[0] == "-n":  # no baseline at all: nothing to compare against
-            ok, out = True, "0"
+        return res
+    baseline = load_json(os.path.join(d, "baseline.json"), {}) or {}
+    rng = new_commit_range(repo, baseline, state, [])
+    commits = 0
+    if rng and rng[0] != "-n":  # "-n": no baseline at all, nothing to compare against
+        ok, out = git(repo, "rev-list", "--count", *rng)
         commits = int(out) if ok and out.strip().isdigit() else 0
-        if "tags" in baseline:
-            new_tags = sorted(set(tag_names(repo)) - set(baseline["tags"]))
-        else:  # map rendered by an older version: fall back to tag dates
-            new_tags = []
-            ok, out = git(repo, "for-each-ref", "--format=%(refname:short)\x03%(creatordate:iso-strict)", "refs/tags")
-            t0 = dt.datetime.fromisoformat(since)
-            for line in (out.splitlines() if ok and out else []):
-                name, _, date = line.partition("\x03")
-                try:
-                    if dt.datetime.fromisoformat(date.replace("Z", "+00:00")) > t0:
-                        new_tags.append(name)
-                except ValueError:
-                    pass
-        age_h = (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(since)).total_seconds() / 3600
-        stale = commits >= a.commits or bool(new_tags) or (commits > 0 and age_h >= a.hours)
-        res.update(status="stale" if stale else "fresh", commits_since=commits, new_tags=new_tags,
-                   age_hours=round(age_h, 1))
-        if stale:
-            why = [f"{commits} new commits"] if commits else []
-            why += [f"new tag {', '.join(new_tags)}"] if new_tags else []
-            res["reason"] = "; ".join(why)
+    if "tags" in baseline:
+        new_tags = sorted(set(tag_names(repo)) - set(baseline["tags"]))
+    else:  # map rendered by an older version: fall back to tag dates
+        new_tags = []
+        ok, out = git(repo, "for-each-ref", "--format=%(refname:short)\x03%(creatordate:iso-strict)", "refs/tags")
+        t0 = dt.datetime.fromisoformat(since)
+        for line in (out.splitlines() if ok and out else []):
+            name, _, date = line.partition("\x03")
+            try:
+                if dt.datetime.fromisoformat(date.replace("Z", "+00:00")) > t0:
+                    new_tags.append(name)
+            except ValueError:
+                pass
+    files = 0
+    if baseline.get("worktree_fp") is not None:
+        _, fp = worktree(repo)
+        old = baseline["worktree_fp"]
+        files = sum(1 for p in fp.keys() | old.keys() if fp.get(p) != old.get(p))
+    age_h = (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(since)).total_seconds() / 3600
+    stale = (commits >= commits_at or bool(new_tags) or files >= files_at
+             or ((commits or files) and age_h >= hours))
+    res.update(status="stale" if stale else "fresh", commits_since=commits, new_tags=new_tags,
+               worktree_changed=files, age_hours=round(age_h, 1))
+    why = [f"{commits} new commits"] if commits else []
+    why += [f"{files} files edited"] if files else []
+    why += [f"new tag {', '.join(new_tags)}"] if new_tags else []
+    if why:
+        res["reason"] = "; ".join(why)
+    return res
+
+
+def cmd_status(a):
+    repo = repo_root(a.repo)
+    d = os.path.abspath(a.out) if a.out else os.path.join(repo, ".project-map")
+    res = staleness(repo, d, a.commits, a.hours, a.files)
     if a.json:
         print(json.dumps(res, ensure_ascii=False))
     else:
         extra = f" ({res['reason']})" if res.get("reason") else ""
+        since = res.get("last_render")
         print(f"{res['status']}{extra}" + (f" · last update {fmt_time(since)}" if since else ""))
+
+
+AUTO_DEFAULTS = {"auto": False, "every_minutes": 20, "agent": "same"}
+
+
+def load_config(d):
+    return {**AUTO_DEFAULTS, **(load_json(os.path.join(d, "config.json"), {}) or {})}
+
+
+def cmd_auto(a):
+    """Per-repo switch for background refreshes started by the plugin hooks."""
+    repo = repo_root(a.repo)
+    d = out_dir(repo, a.out)
+    cfg = load_config(d)
+    if a.state in ("on", "off"):
+        cfg["auto"] = a.state == "on"
+    if a.every:
+        cfg["every_minutes"] = a.every
+    if a.agent:
+        cfg["agent"] = a.agent
+    if a.state or a.every or a.agent:
+        dump_json(os.path.join(d, "config.json"), cfg)
+    print(json.dumps(cfg))
+
+
+def summary_text(repo, d, budget=1800):
+    """A few lines about the current map, for hooks to hand to the agent at session start."""
+    m = load_json(os.path.join(d, "map.json"))
+    st = staleness(repo, d)
+    if not isinstance(m, dict) or st["status"] == "none":
+        return None
+    lines = [f"you-are-here: project map {os.path.join(d, 'index.html')} "
+             f"({st['status']}{', ' + st['reason'] if st.get('reason') else ''})."]
+    if isinstance(m.get("headline"), str):
+        lines.append(f"Headline: {m['headline']}")
+    cur = next((s.get("name") for s in m.get("milestones") or [] if isinstance(s, dict) and s.get("status") == "current"), None)
+    rem = [r.get("label") for r in m.get("remaining") or [] if isinstance(r, dict) and r.get("status") != "done"]
+    if cur:
+        lines.append(f"Current milestone: {cur}; {len(rem)} left: {', '.join(map(str, rem[:6]))}")
+    bn = next((n.get("label") for n in (m.get("chain") or {}).get("nodes") or [] if isinstance(n, dict) and n.get("bottleneck")), None)
+    if bn:
+        lines.append(f"Bottleneck: {bn}")
+    ns = m.get("next_step") if isinstance(m.get("next_step"), dict) else {}
+    if ns.get("title"):
+        lines.append(f"Next step ({ns.get('owner') or 'unassigned'}): {ns['title']}")
+    for q in (m.get("decisions") or [])[:4]:
+        if isinstance(q, dict) and q.get("question"):
+            mode = f"default '{q.get('default')}' goes ahead {q.get('deadline')}" if q.get("deadline") and q.get("reversible") is True \
+                else f"waits for the user (default '{q.get('default')}')"
+            lines.append(f"Decision: {q['question']} - {mode}")
+    stuck = [p.get("name") for p in m.get("parts") or [] if isinstance(p, dict) and p.get("status") == "stuck"]
+    if stuck:
+        lines.append(f"Stuck: {', '.join(map(str, stuck))}")
+    text = "\n".join(lines)
+    return text[:budget]
+
+
+def cmd_summary(a):
+    repo = repo_root(a.repo)
+    d = os.path.abspath(a.out) if a.out else os.path.join(repo, ".project-map")
+    t = summary_text(repo, d)
+    print(t if t else "no map yet")
 
 
 def cmd_style(a):
@@ -2102,9 +2179,21 @@ def main():
     p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--out")
     p.add_argument("--commits", type=int, default=5, help="stale after this many new commits (default 5)")
-    p.add_argument("--hours", type=float, default=12, help="stale after this many hours with any new commit")
+    p.add_argument("--hours", type=float, default=12, help="stale after this many hours with any new change")
+    p.add_argument("--files", type=int, default=8, help="stale after this many edited files (default 8)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
+    p = sp.add_parser("auto", help="turn background refreshes from the plugin hooks on/off for this repo")
+    p.add_argument("state", nargs="?", choices=("on", "off"))
+    p.add_argument("repo", nargs="?", default=".")
+    p.add_argument("--out")
+    p.add_argument("--every", type=int, help="minimum minutes between background refreshes (default 20)")
+    p.add_argument("--agent", choices=("same", "claude", "codex", "grok"), help="CLI that runs the refresh")
+    p.set_defaults(fn=cmd_auto)
+    p = sp.add_parser("summary", help="a few lines about the map, for hooks")
+    p.add_argument("repo", nargs="?", default=".")
+    p.add_argument("--out")
+    p.set_defaults(fn=cmd_summary)
     p = sp.add_parser("style")
     p.add_argument("--theme", choices=("dark", "light", "auto"))
     p.add_argument("--accent")

@@ -1,0 +1,42 @@
+{
+  "name": "you-are-here",
+  "version": "0.2.0",
+  "description": "A one-file HTML project map your coding agent keeps up to date: milestone track with 'you are here', blocker chain, part status, next step, decisions with defaults, and what changed overnight.",
+  "author": {
+    "name": "majiayu000",
+    "url": "https://github.com/majiayu000"
+  },
+  "homepage": "https://github.com/majiayu000/you-are-here",
+  "repository": "https://github.com/majiayu000/you-are-here",
+  "license": "MIT",
+  "keywords": [
+    "project-map",
+    "status",
+    "progress",
+    "overnight",
+    "autonomous",
+    "dashboard",
+    "codex",
+    "claude-code",
+    "grok"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "You Are Here",
+    "shortDescription": "Morning project map for long agent runs",
+    "longDescription": "A one-file HTML project map your coding agent keeps up to date: milestone track with 'you are here', blocker chain, part status, next step, decisions with defaults, and what changed overnight. Hooks keep the map fresh during long runs; the skill answers 'where are we?' from it.",
+    "developerName": "majiayu000",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Draw a project map for this repo",
+      "Where are we?",
+      "Turn on automatic map refreshes"
+    ],
+    "brandColor": "#2DD4BF",
+    "websiteURL": "https://github.com/majiayu000/you-are-here"
+  }
+}
