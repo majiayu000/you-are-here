@@ -71,6 +71,8 @@ Talk to your agent:
 - "How are all my projects doing?": `pmap.py index ~/code` writes one page over every repo that
   has a map, with the ones waiting on you first.
 
+  ![One page over three projects](docs/overview.png)
+
 When you answer a decision (in chat, or by pasting what the page's Accept / Override buttons copy),
 the agent records it with `pmap.py answer`. Every agent and every background refresh then sees the
 answer, and the page marks the decision answered.

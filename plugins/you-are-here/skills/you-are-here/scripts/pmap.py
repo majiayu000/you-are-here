@@ -2374,7 +2374,7 @@ def index_row(repo):
     }
 
 
-def render_index(rows, root, style):
+def render_index(rows, root, style, label=None):
     L = TEXT.get(style.get("lang") or "zh", TEXT["zh"])
     zh = L is TEXT["zh"]
     rows = sorted(rows, key=lambda x: (-x.get("waits", 0), -x.get("stuck", 0), x.get("status") != "stale",
@@ -2408,7 +2408,9 @@ def render_index(rows, root, style):
     waiting = sum(x.get("waits", 0) for x in rows)
     sub = (f'{len(rows)} 个项目 · {waiting} 件事等你 · {sum(1 for x in rows if x.get("status") == "stale")} 张地图过时'
            if zh else f'{len(rows)} projects · {waiting} waiting on you · {sum(1 for x in rows if x.get("status") == "stale")} stale maps')
-    body = (f'<header><h1>{title}</h1><p class="sub">{html.escape(root)} · {sub}</p></header>'
+    home = os.path.expanduser("~")
+    shown = label or (("~" + root[len(home):]) if root.startswith(home) else root)
+    body = (f'<header><h1>{title}</h1><p class="sub">{html.escape(shown)} · {sub}</p></header>'
             f'<ul class="rows">{"".join(cards) or "<li>" + ("还没有地图" if zh else "No maps yet") + "</li>"}</ul>')
     css = PAGE.split("<style>")[1].split("</style>")[0].format(accent=style["accent"]).split("*{box-sizing")[0]
     return (f'<!doctype html><html lang="{"zh-CN" if zh else "en"}" data-theme="{html.escape(style["theme"])}"><head>'
@@ -2442,7 +2444,8 @@ def cmd_index(a):
             rows.append({"repo": repo, "name": os.path.basename(repo), "broken": True, "error": repr(e)})
     out = os.path.abspath(os.path.expanduser(a.out)) if a.out else os.path.join(
         os.path.expanduser("~/.cache/you-are-here"), "index.html")
-    write_text(out, render_index(rows, root, load_style({})))
+    style = load_style({"style": {"lang": a.lang}} if a.lang else {})
+    write_text(out, render_index(rows, root, style, a.label))
     if a.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1))
     for x in rows:
@@ -2557,6 +2560,8 @@ def main():
     p.add_argument("root", nargs="?", default=".")
     p.add_argument("--out", help="output HTML (default ~/.cache/you-are-here/index.html)")
     p.add_argument("--depth", type=int, default=4, help="how deep to look for repos (default 4)")
+    p.add_argument("--lang", choices=("zh", "en"))
+    p.add_argument("--label", help="folder name to show on the page (default: the path, ~ for home)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_index)
     p = sp.add_parser("style")

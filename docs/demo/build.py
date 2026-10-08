@@ -149,16 +149,60 @@ def main():
         json.dump(MORNING, fh)
     run("render")
     shutil.copy(os.path.join(out, "index.html"), os.path.join(HERE, "index.html"))
+    build_overview(tmp, repo, out, env)
     chrome = next((c for c in CHROME if c and os.path.exists(c)), None)
     if chrome:
-        png = os.path.join(ROOT, "docs", "screenshot.png")
-        sh(chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2",
-           "--virtual-time-budget=4000", "--window-size=1280,1500",
-           f"--screenshot={png}", "file://" + os.path.join(HERE, "index.html"))
-        print(png)
+        for page, png, size in (("index.html", "screenshot.png", "1280,1500"), ("all.html", "overview.png", "1000,760")):
+            png = os.path.join(ROOT, "docs", png)
+            sh(chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--force-device-scale-factor=2",
+               "--virtual-time-budget=4000", f"--window-size={size}",
+               f"--screenshot={png}", "file://" + os.path.join(HERE, page))
+            print(png)
     else:
         print("Chrome not found: open docs/demo/index.html and take the screenshot by hand")
     shutil.rmtree(tmp)
+
+
+OTHERS = {
+    "ferry": {"summary": "HTTP API for booking ferry seats.", "milestone": "v2 pricing",
+              "headline": "Payments provider rejected the sandbox keys overnight; refunds and invoices wait on two calls from you.",
+              "parts": [("payments", "Payments", "stuck", "new sandbox keys from the provider"),
+                        ("pricing", "Dynamic pricing", "in_progress", None), ("api", "Public API", "done", None)],
+              "decisions": ["Refund to card or to credit?", "Ship invoices before pricing?"]},
+    "orbit": {"summary": "CLI that syncs dotfiles across machines.", "milestone": "1.0",
+              "headline": "Windows support merged; only the docs site is left for 1.0.",
+              "parts": [("sync", "Sync engine", "done", None), ("win", "Windows support", "done", None),
+                        ("docs", "Docs site", "in_progress", None)], "decisions": []},
+}
+
+
+def build_overview(tmp, lumen_repo, lumen_out, env):
+    """Three fictional repos under one folder, rendered as the all-projects page (pmap.py index)."""
+    root = os.path.join(tmp, "projects")
+    shutil.copytree(lumen_repo, os.path.join(root, "lumen"))
+    shutil.copytree(lumen_out, os.path.join(root, "lumen", ".project-map"))
+    for name, o in OTHERS.items():
+        repo = os.path.join(root, name)
+        sh("git", "init", "-q", repo)
+        with open(os.path.join(repo, "README.md"), "w") as fh:
+            fh.write(f"# {name}\n")
+        sh("git", "-C", repo, "add", ".")
+        sh("git", "-C", repo, "commit", "-qm", "init", env=env)
+        m = {"project": {"name": name, "summary": o["summary"]}, "style": {"lang": "en"}, "headline": o["headline"],
+             "generated_at": "2026-10-07T06:40:00+08:00",
+             "milestones": [{"name": o["milestone"], "status": "current"}],
+             "remaining": [{"label": p[1], "status": p[2]} for p in o["parts"] if p[2] != "done"],
+             "chain": {"nodes": [{"id": p[0], "label": p[1], "status": p[2], "bottleneck": i == 0}
+                                 for i, p in enumerate([p for p in o["parts"] if p[2] != "done"])], "edges": []},
+             "parts": [dict({"id": p[0], "name": p[1], "status": p[2], "inferred": True},
+                            **({"waiting_on": p[3]} if p[3] else {})) for p in o["parts"]],
+             "next_step": {"title": o["parts"][0][1] if o["parts"][0][2] != "done" else "Docs site", "owner": "user" if o["decisions"] else "agent"},
+             "decisions": [{"question": q, "default": "wait"} for q in o["decisions"]]}
+        sh(sys.executable, PMAP, "collect", repo, "--no-gh", env=env)
+        with open(os.path.join(repo, ".project-map", "map.json"), "w") as fh:
+            json.dump(m, fh)
+        sh(sys.executable, PMAP, "render", repo, env=env)
+    sh(sys.executable, PMAP, "index", root, "--out", os.path.join(HERE, "all.html"), "--lang", "en", "--label", "~/code", env=env)
 
 
 if __name__ == "__main__":
