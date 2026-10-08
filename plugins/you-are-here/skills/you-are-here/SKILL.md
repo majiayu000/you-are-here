@@ -71,6 +71,8 @@ pr and run list). It writes only inside the output dir and holds a lock there wh
      `unmapped_files`, `worktree_changed`, `new_tags`, `plans` (progress changes) and `github`
      (PRs opened, merged or changed, issues, new CI runs). Re-examine what the delta names, plus a
      chain node whose state lives elsewhere. Carry everything else over; don't re-read the repo.
+   - Both modes: `facts.json → answers` holds the user's answers to decisions since the last map.
+     Apply each one: drop or update the decision, and follow the answer in the chain and next step.
 4. **Write `map.json`** in the output dir, following `references/schema.md`:
    - `headline`: one sentence for the morning. What changed since the last map and what needs the
      user, e.g. "Search shipped; sync is stuck on your clock decision; PDF export is next."
@@ -90,6 +92,17 @@ pr and run list). It writes only inside the output dir and holds a lock there wh
 6. **Report** in a few lines: the HTML path, the headline, the next milestone and how many items are
    left, the bottleneck, the next step and who does it, decisions waiting on the user, and anything
    uncertain.
+
+## When the user answers a decision
+
+Whether they answer in chat or paste a line copied from the page, record it so every agent and
+background refresh sees it: `PMAP answer <repo> --id <decision id or d0, d1…> --answer "<answer>"`
+(or `--question "<text>"`). Then act on it.
+
+## All projects at once
+
+`PMAP index <folder>` writes one page over every repo under the folder that has a map, with the
+repos that need the user first. Use it when the user asks about all their projects.
 
 ## Answering "where are we?"
 

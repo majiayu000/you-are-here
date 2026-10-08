@@ -7,6 +7,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -240,6 +241,28 @@ class Safety(unittest.TestCase):
             self.assertEqual(len(os.listdir(os.path.join(r.out, "history"))), ok + 1)
             json.loads(read(os.path.join(r.out, "state.json")))
             self.assertFalse([f for f in os.listdir(r.out) if f.startswith(".tmp-") or f == ".lock"])
+
+
+class Notify(unittest.TestCase):
+    def test_worse_or_new_decision_notifies(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = Repo(t)
+            r.commit("src/core.py", "x\n", "init")
+            r.cycle()
+            before = json.loads(read(os.path.join(r.out, "state.json")))["last_render"]
+            m = copy.deepcopy(MAP)
+            m["parts"][0].update(status="stuck", waiting_on="a key")
+            m["decisions"].append({"question": "new call?", "default": "wait"})
+            r.write_map(m)
+            time.sleep(1.1)
+            r.pmap("render")
+            log = os.path.join(t, "notes")
+            os.environ["YAH_NOTIFY_LOG"] = log
+            try:
+                self.assertEqual(pmap.notify_after_refresh(r.dir, r.out, before), "1 变坏 · 1 等你")
+            finally:
+                del os.environ["YAH_NOTIFY_LOG"]
+            self.assertIn("1 变坏 · 1 等你", read(log))
 
 
 class Index(unittest.TestCase):

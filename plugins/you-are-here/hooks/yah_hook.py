@@ -155,11 +155,13 @@ def start_refresh(repo, d, cfg, why, data=None):
     cmd = refresh_command(agent, repo, d)
     if not cmd:
         return f"you-are-here: could not find the `{agent}` CLI for a background map refresh."
-    log = open(os.path.join(d, "bg.log"), "a")
-    log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {agent} refresh ({why})\n")
-    log.flush()
-    p = subprocess.Popen(cmd, cwd=repo if agent != "codex" else d, stdin=subprocess.DEVNULL, stdout=log,
-                         stderr=log, start_new_session=True, env={**os.environ, "YAH_BG": "1"})
+    with open(os.path.join(d, "bg.log"), "a", encoding="utf-8") as log:
+        log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {agent} refresh ({why})\n")
+        log.flush()
+        # a small wrapper waits for the agent, then notifies when something got worse or needs the user
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--bg-run", repo, d, agent, json.dumps(cmd)],
+                             cwd=repo, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+                             env={**os.environ, "YAH_BG": "1"})
     with open(os.path.join(d, ".bg.json"), "w") as f:
         json.dump({"pid": p.pid, "agent": agent, "started": time.time(), "why": why}, f)
     return f"you-are-here: map is stale ({why}); a background refresh started (log: {d}/bg.log)."
@@ -231,7 +233,22 @@ def main():
             start_refresh(repo, d, cfg, st.get("reason") or "stale", data)
 
 
+def bg_run(repo, d, agent, cmd_json):
+    """Runs detached: the agent refresh, then a notification about the result."""
+    import pmap
+    before = (pmap.load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render")
+    cmd = json.loads(cmd_json)
+    code = subprocess.call(cmd, cwd=repo if agent != "codex" else d, stdin=subprocess.DEVNULL)
+    print(f"--- refresh exited {code}", flush=True)
+    print(f"--- notify: {pmap.notify_after_refresh(repo, d, before)}", flush=True)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 6 and sys.argv[1] == "--bg-run":
+        try:
+            bg_run(*sys.argv[2:])
+        finally:
+            sys.exit(0)
     try:
         main()
     except Exception as e:  # a map helper must never break the host session

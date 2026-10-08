@@ -40,7 +40,8 @@ class Hooks(unittest.TestCase):
 
     def env(self, **extra):
         e = {k: v for k, v in self.r.env.items() if not k.startswith(("CODEX_", "GROK_", "YAH_"))}
-        e.update(PATH=self.bin + os.pathsep + e["PATH"], FAKE_LOG=self.log, **extra)
+        e.update(PATH=self.bin + os.pathsep + e["PATH"], FAKE_LOG=self.log,
+                 YAH_NOTIFY_LOG=os.path.join(self.tmp.name, "notes"), **extra)
         return e
 
     def hook(self, event, data=None, **env):
@@ -156,6 +157,33 @@ class Hooks(unittest.TestCase):
             self.r.commit("src/core.py", f"{i}\n", f"c{i}")
         self.hook("Stop", {"transcript_path": os.path.expanduser("~/.codex/sessions/2026/x.jsonl"), "turn_id": "t"})
         self.assertEqual(os.path.basename(self.calls()[0][0]), "codex")
+
+    def test_failed_refresh_notifies(self):
+        self.draw_map()
+        self.pmap("auto", "on", self.r.dir)
+        for i in range(5):
+            self.r.commit("src/core.py", f"{i}\n", f"c{i}")
+        self.hook("Stop", CODEX_THREAD_ID="t1")
+        notes = os.path.join(self.tmp.name, "notes")
+        end = time.time() + 10
+        while time.time() < end and not os.path.exists(notes):
+            time.sleep(0.1)
+        self.assertIn("did not update the map", read(notes))  # the fake CLI never renders
+
+    def test_answer_reaches_page_facts_and_summary(self):
+        m = dict(MAP, decisions=[{"id": "ship", "question": "ship?", "default": "no"}])
+        sh(sys.executable, os.path.join(PLUGIN, "skills", "you-are-here", "scripts", "pmap.py"), "collect",
+           self.r.dir, "--no-gh", env=self.r.env)
+        put(os.path.join(self.out, "map.json"), json.dumps(m))
+        self.pmap("render", self.r.dir)
+        out = self.pmap("answer", self.r.dir, "--id", "ship", "--answer", "yes, ship it").stdout
+        self.assertIn("ship? -> yes, ship it", out)
+        self.assertIn("User answered (not yet on the map): ship? -> yes, ship it", self.hook("SessionStart"))
+        self.assertIn("user answers to apply: ship? -> yes, ship it", self.pmap("collect", self.r.dir, "--no-gh").stdout)
+        self.pmap("render", self.r.dir)
+        page = read(os.path.join(self.out, "index.html"))
+        self.assertIn('class="answered"', page)
+        self.assertIn("yes, ship it", page)
 
     def test_background_run_does_not_recurse(self):
         self.draw_map()

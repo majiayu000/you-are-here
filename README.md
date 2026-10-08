@@ -68,6 +68,13 @@ Talk to your agent:
 - "Keep working on this overnight": the agent draws the map first and offers to turn on automatic
   refreshes.
 
+- "How are all my projects doing?": `pmap.py index ~/code` writes one page over every repo that
+  has a map, with the ones waiting on you first.
+
+When you answer a decision (in chat, or by pasting what the page's Accept / Override buttons copy),
+the agent records it with `pmap.py answer`. Every agent and every background refresh then sees the
+answer, and the page marks the decision answered.
+
 Automatic refreshes are off until you turn them on for a repo:
 
 ```sh
@@ -94,7 +101,8 @@ milestone checks and background refreshes work the same way as in the other two 
 A background refresh runs the same agent you are using, headless and detached: `claude -p`,
 `codex exec` or `grok -p`. It is limited to one at a time per repo and to one every 20 minutes
 (`auto on --every 30` changes that). It writes only inside `.project-map/` and logs to
-`.project-map/bg.log`. In Claude Code and Grok you can also start the `you-are-here` subagent in
+`.project-map/bg.log`. When it finishes, you get a desktop notification (macOS, or `notify-send` on
+Linux) if a part got worse, a new decision needs you, or the refresh failed. In Claude Code and Grok you can also start the `you-are-here` subagent in
 the background from inside a session.
 
 ## Rules the map follows

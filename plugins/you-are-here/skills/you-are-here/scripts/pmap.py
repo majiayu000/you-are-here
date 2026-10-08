@@ -588,6 +588,8 @@ def collect(repo, d, no_gh):
     fp = g.pop("_worktree_fp")
     tags = tag_names(repo)
     facts["plans"] = collect_plans(repo)
+    since_render = state.get("last_render")
+    facts["answers"] = [x for x in load_answers(d) if not since_render or (x.get("at") or "") >= since_render]
     if incremental:
         hits, unmapped = touched_parts(prev_map, g["changed_files"])
         old_fp = baseline.get("worktree_fp")
@@ -630,6 +632,8 @@ def collect(repo, d, no_gh):
             print(f"github: {json.dumps(dl['github'], ensure_ascii=False)[:400]}")
         if dl.get("plans"):
             print("plans: " + "; ".join(dl["plans"])[:400])
+    if facts["answers"]:
+        print("user answers to apply: " + "; ".join(f"{x['question']} -> {x['answer']}" for x in facts["answers"])[:400])
     if facts["plans"]:
         print("plan files: " + ", ".join(f"{p['path']} {'?' if p['done'] is None else p['done']}/{p['total']}"
                                          for p in facts["plans"][:8]) + (" …" if len(facts["plans"]) > 8 else ""))
@@ -1007,7 +1011,7 @@ TEXT = {
            "done_quiet": "已完成", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
            "open_link": "在 GitHub 打开", "waits": "等你确认",
            "better": "变好", "worse": "变坏", "needs_you": "等你", "owner_user": "你来做", "owner_agent": "agent 来做",
-           "unblocks": "做完解锁", "how": "怎么做", "open_left": "还差", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
+           "unblocks": "做完解锁", "how": "怎么做", "open_left": "还差", "answered": "你已回答", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
            "ms_done": "Done", "ms_current": "In progress", "ms_future": "Later",
            "title": "Project map", "updated": "Updated", "commits_since": "commits since last", "commits_recent": "recent commits",
@@ -1025,7 +1029,7 @@ TEXT = {
            "hide_path": "Hide the other path", "done_quiet": "Done", "scrub_then": "Then", "scrub_now": "Now",
            "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you",
            "better": "better", "worse": "worse", "needs_you": "need you", "owner_user": "You", "owner_agent": "Agent",
-           "unblocks": "Unblocks", "how": "How", "open_left": "Still open", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
+           "unblocks": "Unblocks", "how": "How", "open_left": "Still open", "answered": "You answered", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
            "copy_hint": "Copy, then paste back to the agent", "copy": "Copy"},
 }
 
@@ -1068,6 +1072,18 @@ def fmt_time(iso):
         return dt.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone().strftime("%m-%d %H:%M")
     except (ValueError, AttributeError):
         return iso or ""
+
+
+def out_dir_of(facts):
+    return os.path.join((facts.get("git") or {}).get("root") or ".", ".project-map") if facts.get("out") is None else facts["out"]
+
+
+def answer_text(q, answer, did, facts):
+    """What the Accept / Override buttons copy: readable for the agent, with the command that records it."""
+    repo = ((facts or {}).get("git") or {}).get("root") or "<repo>"
+    pm = os.path.abspath(__file__)
+    return (f"you-are-here decision\nQuestion: {q.get('question')}\nAnswer: {answer}\n"
+            f"Record it and act on it: python3 {pm} answer {repo} --id {did} --answer \"{answer.replace(chr(34), chr(39))}\"")
 
 
 def cls(v, allowed, fallback):
@@ -1495,9 +1511,11 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     unl = (f'<p class="unl"><span>{L["unblocks"]}</span> {r(ns["unblocks"])}</p>' if ns.get("unblocks") else "")
     side = [f'<section class="card next"><h2>{L["next_step"]}{who}</h2><p class="nt">{r(ns["title"])}</p>'
             f'<p>{r(ns.get("why") or "")}</p>{how}{unl}</section>']
+    answers = load_answers(out_dir_of(facts)) if facts else []
     if m.get("decisions"):
         qs = []
         for i, q in enumerate(m["decisions"]):
+            ans = answer_for(q, answers)
             did = q.get("id") or f"d{i}"
             iso = parse_deadline(q.get("deadline"), m.get("generated_at"))
             prop = f' <span class="tag">{L["proposed"]}</span>' if q.get("proposed") else ""
@@ -1509,7 +1527,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
                 when = f'{html.escape(L["by"])} <time{stamp}>{r(shown)}</time> <span class="count"></span>→ '
             else:
                 when = html.escape(L["default"]) + " → "
-            copy = attr("Decision: " + str(q.get("default") or "") + "\nQuestion: " + str(q.get("question") or "")).replace("\n", "&#10;")
+            copy = attr(answer_text(q, str(q.get("default") or ""), did, facts)).replace("\n", "&#10;")
             alt = ""
             opts = q.get("options") if isinstance(q.get("options"), list) else []
             if forked and fork.get("id") == q.get("id"):
@@ -1518,6 +1536,11 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
                 alt = (f'<button type="button" class="act altpath" data-fork="{attr(q["id"])}" '
                        f'data-option="{other}" data-show="{attr(L["see_path"])}" data-hide="{attr(L["hide_path"])}">'
                        f'{html.escape(L["see_path"])}</button>')
+            if ans:
+                qs.append(f'<li class="answered" data-decision="{attr(did)}"><p class="q">{r(q["question"])}</p>'
+                          f'<p class="d">{L["answered"]} → <b class="def">{r(ans["answer"])}</b> '
+                          f'<span class="t">{fmt_time(ans.get("at"))}</span></p></li>')
+                continue
             qs.append(
                 f'<li data-decision="{attr(did)}">'
                 f'<p class="q">{r(q["question"])}{prop}</p>'
@@ -1602,6 +1625,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     payload = {
         "slug": slug,
         "web": web,
+        "answer_tpl": answer_text({"question": "{Q}"}, "{A}", "{ID}", facts),
         "peek": peek_db(facts),
         "frames": use_frames,
         "labels": {"expired": L["expired"], "open": L["open_link"]},
@@ -1716,6 +1740,7 @@ aside .card{{padding:16px 18px}}
 .hl-you b{{color:var(--stuck)}} .hl-bn{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .hl-since{{color:var(--dim)}}
 .owner{{float:right;text-transform:none;letter-spacing:0;font-size:12px;padding:1px 8px;border-radius:6px;background:var(--card2)}}
 .o-user{{color:var(--stuck)}} .o-agent{{color:var(--accent)}}
+.decide li.answered{{opacity:.75}} .decide li.answered .def{{color:var(--done)}}
 .open-left{{font-size:13px}} .open-left span{{color:var(--prog);font-weight:600;margin-right:4px}}
 .next .how,.next .unl{{margin:8px 0 0;font-size:13px}} .next .how span,.next .unl span{{color:var(--dim);margin-right:6px}}
 .next{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .next .nt{{font-size:18px;font-weight:650;margin:0 0 6px;color:var(--accent)}}
@@ -2074,7 +2099,9 @@ SCRIPT = r"""
     if (!text) return;
     var li = form.closest("li");
     var q = li ? (li.querySelector(".q").textContent || "") : "";
-    copyText("Decision: " + text + "\nQuestion: " + q, li);
+    var id = li ? li.getAttribute("data-decision") : "";
+    var tpl = DATA.answer_tpl || "Question: {Q}\nAnswer: {A}";
+    copyText(tpl.split("{Q}").join(q).split("{A}").join(text.replace(/"/g, "'")).split("{ID}").join(id), li);
   });
 
   document.body.addEventListener("keydown", function (ev) {
@@ -2119,6 +2146,8 @@ def render(repo, d):
     m.setdefault("style", {})["lang"] = style["lang"]
     m.setdefault("generated_at", now_iso())
     facts = load_json(os.path.join(d, "facts.json"))
+    if isinstance(facts, dict):
+        facts["out"] = d  # in memory only: where answers.json lives
     state = load_json(os.path.join(d, "state.json"), {}) or {}
     prev = load_json(state["last_map"]) if state.get("last_map") else None
     marks, lines = diff_maps(prev, m)
@@ -2199,7 +2228,48 @@ def cmd_status(a):
         print(f"{res['status']}{extra}" + (f" · last update {fmt_time(since)}" if since else ""))
 
 
-AUTO_DEFAULTS = {"auto": False, "every_minutes": 20, "agent": "same"}
+AUTO_DEFAULTS = {"auto": False, "every_minutes": 20, "agent": "same", "notify": True}
+
+
+def send_notification(title, body):
+    """Desktop notification: macOS Notification Center, Linux notify-send. YAH_NOTIFY_LOG redirects to a file."""
+    log = os.environ.get("YAH_NOTIFY_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(f"{title}\t{body}\n")
+        return True
+    if sys.platform == "darwin" and shutil.which("osascript"):
+        esc = lambda t: str(t).replace("\\", "\\\\").replace('"', '\\"')
+        return run(["osascript", "-e", f'display notification "{esc(body)}" with title "{esc(title)}"'], timeout=10)[0]
+    if shutil.which("notify-send"):
+        return run(["notify-send", str(title), str(body)], timeout=10)[0]
+    return False
+
+
+def notify_after_refresh(repo, d, before):
+    """After a background refresh: tell the user when something got worse, needs them, or the refresh failed."""
+    if not load_config(d).get("notify", True):
+        return None
+    state = load_json(os.path.join(d, "state.json"), {}) or {}
+    name = os.path.basename(repo)
+    if state.get("last_render") == before:
+        send_notification(f"you-are-here · {name}", "Background refresh did not update the map; see .project-map/bg.log")
+        return "failed"
+    snaps = sorted(f for f in os.listdir(os.path.join(d, "history")) if f.endswith(".json"))
+    cur = load_json(os.path.join(d, "history", snaps[-1])) if snaps else None
+    prev = load_json(os.path.join(d, "history", snaps[-2])) if len(snaps) > 1 else None
+    if not cur:
+        return None
+    _, lines = diff_maps(prev, cur)
+    worse = sum(1 for k, _ in lines if k == "stuck")
+    old_q = {q.get("question") for q in (prev or {}).get("decisions") or []}
+    new_q = [q for q in cur.get("decisions") or [] if q.get("question") not in old_q]
+    if not worse and not new_q:
+        return None
+    L = labels(cur)
+    bits = ([f"{worse} {L['worse']}"] if worse else []) + ([f"{len(new_q)} {L['needs_you']}"] if new_q else [])
+    send_notification(f"you-are-here · {name}: {' · '.join(bits)}", cur.get("headline") or cur["next_step"]["title"])
+    return " · ".join(bits)
 
 
 def load_config(d):
@@ -2247,6 +2317,10 @@ def summary_text(repo, d, budget=1800):
             mode = f"default '{q.get('default')}' goes ahead {q.get('deadline')}" if q.get("deadline") and q.get("reversible") is True \
                 else f"waits for the user (default '{q.get('default')}')"
             lines.append(f"Decision: {q['question']} - {mode}")
+    since = (load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render") or ""
+    for x in load_answers(d):
+        if (x.get("at") or "") >= since:
+            lines.append(f"User answered (not yet on the map): {x.get('question')} -> {x.get('answer')}")
     stuck = [p.get("name") for p in m.get("parts") or [] if isinstance(p, dict) and p.get("status") == "stuck"]
     if stuck:
         lines.append(f"Stuck: {', '.join(map(str, stuck))}")
@@ -2372,6 +2446,40 @@ def cmd_index(a):
     print(f"index: {out}")
 
 
+def load_answers(d):
+    data = load_json(os.path.join(d, "answers.json"), []) or []
+    return [x for x in data if isinstance(x, dict) and x.get("answer")]
+
+
+def answer_for(q, answers):
+    """The latest answer to a decision, matched by id or by question text."""
+    hit = None
+    for x in answers:
+        if (q.get("id") and x.get("id") == q.get("id")) or (x.get("question") or "").strip() == (q.get("question") or "").strip():
+            hit = x
+    return hit
+
+
+def cmd_answer(a):
+    """Record the user's answer to a decision, so every agent (and background refreshes) can act on it."""
+    repo = repo_root(a.repo)
+    d = out_dir(repo, a.out)
+    m = load_json(os.path.join(d, "map.json"), {}) or {}
+    q = None
+    for i, x in enumerate(m.get("decisions") or []):
+        if (a.id and (x.get("id") == a.id or f"d{i}" == a.id)) or (a.question and x.get("question", "").strip() == a.question.strip()):
+            q = x
+    if not q and not a.question:
+        sys.exit("pmap: no decision with that id in map.json; pass --question with the question text")
+    entry = {"id": (q or {}).get("id") or a.id, "question": (q or {}).get("question") or a.question,
+             "answer": a.answer, "at": now_iso()}
+    with locked(d):
+        answers = load_json(os.path.join(d, "answers.json"), []) or []
+        answers.append(entry)
+        dump_json(os.path.join(d, "answers.json"), answers)
+    print(f"recorded: {entry['question']} -> {entry['answer']}")
+
+
 def cmd_summary(a):
     repo = repo_root(a.repo)
     d = os.path.abspath(a.out) if a.out else os.path.join(repo, ".project-map")
@@ -2433,6 +2541,13 @@ def main():
     p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--out")
     p.set_defaults(fn=cmd_summary)
+    p = sp.add_parser("answer", help="record the user's answer to a decision on the map")
+    p.add_argument("repo", nargs="?", default=".")
+    p.add_argument("--out")
+    p.add_argument("--id", help="decision id (or d0, d1 ... by position)")
+    p.add_argument("--question", help="decision question text, when there is no id")
+    p.add_argument("--answer", required=True)
+    p.set_defaults(fn=cmd_answer)
     p = sp.add_parser("index", help="one page over every repo under a folder that has a map")
     p.add_argument("root", nargs="?", default=".")
     p.add_argument("--out", help="output HTML (default ~/.cache/you-are-here/index.html)")
