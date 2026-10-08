@@ -1614,7 +1614,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         pin_bits.append(f'<span>{expiring} {html.escape(L["expiring"])}</span>')
     if stray:
         pin_bits.append(f'<span>{len(stray)} {html.escape(L["unmapped"])}</span>')
-    pin = f'<div class="pin" id="pin" hidden>{" · ".join(pin_bits)}</div>'
+    pin = f'<div class="pin" id="pin" hidden>{"".join(pin_bits)}</div>'
     use_frames = frames if frames else [frame_from(m)]
     scrub = ""
     if len(use_frames) >= 2:
@@ -1763,6 +1763,7 @@ th{{color:var(--mut);font-weight:600}}
 display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;background:var(--card);border:1px solid var(--accent);
 border-radius:999px;padding:6px 14px;font-size:13px;box-shadow:0 8px 28px color-mix(in srgb,#000 35%,transparent)}}
 .pin[hidden]{{display:none}} .pin b{{color:var(--accent)}}
+.pin > * + *::before{{content:"·";color:var(--dim);margin-right:10px}}
 .scrub{{display:flex;align-items:center;gap:8px;margin:-8px 0 16px;color:var(--mut);font-size:12px}}
 .scrub input{{flex:1}} #scrubcap{{color:var(--accent)}}
 .filters{{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}}
@@ -1817,7 +1818,9 @@ body[data-filter=in_progress] .pill:not(.p-in_progress){{display:none}}
  .a-inferred span{{background:repeating-linear-gradient(180deg,var(--mut) 0 4px,transparent 4px 8px)}}
  .arrow::after{{right:auto;bottom:0;border:5px solid transparent;border-top:7px solid var(--mut)}}
  .why-pop{{position:static;width:auto}}
- .ms{{flex-basis:112px}} .pin{{border-radius:14px}}}}
+ .ms{{flex-basis:112px}}
+ .pin{{left:12px;right:12px;transform:none;max-width:none;flex-wrap:nowrap;overflow-x:auto;white-space:nowrap;
+   border-radius:12px;scrollbar-width:none}}}}
 </style>
 </head>
 <body><div class="wrap">{body}</div>
@@ -1839,7 +1842,9 @@ SCRIPT = r"""
 
   var here = document.getElementById("here");
   if (here && here.parentElement && here.parentElement.scrollWidth > here.parentElement.clientWidth) {
-    here.parentElement.scrollLeft = here.offsetLeft - here.parentElement.clientWidth / 2 + 60;
+    var list = here.parentElement, lr = list.getBoundingClientRect(), hr = here.getBoundingClientRect();
+    var target = hr.left - lr.left + list.scrollLeft - (list.clientWidth - hr.width) / 2;
+    list.scrollLeft = Math.max(0, Math.min(target, list.scrollWidth - list.clientWidth));
   }
 
   var pin = document.getElementById("pin");
