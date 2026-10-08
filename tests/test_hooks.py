@@ -168,7 +168,7 @@ class Hooks(unittest.TestCase):
 
     def test_bad_input_never_fails_the_host(self):
         for stdin in ("", "not json", "[1,2]"):
-            p = subprocess.run([sys.executable, HOOK, "PostToolUse"], input=stdin, capture_output=True, text=True,
+            p = subprocess.run([sys.executable, HOOK, "PostToolUse"], input=stdin, capture_output=True, text=True, encoding="utf-8",
                                env=self.env(), cwd=self.r.dir)
             self.assertEqual((p.returncode, p.stdout), (0, ""))
 

@@ -9,6 +9,7 @@ Agent-neutral (Claude Code, Codex, Grok, ...). Python 3.8+ stdlib only.
   pmap.py status   <repo> [--out DIR] [--json]    -> none | fresh | stale (git only, no network)
   pmap.py auto     [on|off] <repo> [--every MIN]  -> background refreshes from the plugin hooks
   pmap.py summary  <repo>                         -> a few lines about the map, for hooks
+  pmap.py index    <folder> [--out FILE]          -> one page over every repo that has a map
   pmap.py style    [--theme dark|light|auto] [--accent '#2dd4bf'] [--lang zh|en]
 
 DIR defaults to <repo>/.project-map (self-ignored via its own .gitignore).
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 
 SCHEMA_VERSION = 1
 PART_STATUS = ("done", "in_progress", "not_started", "stuck")
@@ -78,8 +80,11 @@ def write_text(path, text):
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=os.path.basename(path))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)  # mkstemp makes 0600; give the map normal file permissions
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -2249,6 +2254,124 @@ def summary_text(repo, d, budget=1800):
     return text[:budget]
 
 
+INDEX_SKIP = SKIP_DIRS | {"Library", "Applications", ".Trash"}
+
+
+def find_maps(root, depth=4):
+    """Repos under root that have a map: <repo>/.project-map/map.json (default output dir only)."""
+    found = []
+    root = os.path.abspath(os.path.expanduser(root))
+    for cur, dirs, files in os.walk(root):
+        rel = os.path.relpath(cur, root)
+        level = 0 if rel == "." else rel.count(os.sep) + 1
+        if os.path.isfile(os.path.join(cur, ".project-map", "map.json")):
+            found.append(cur)
+        dirs[:] = [x for x in sorted(dirs) if x not in INDEX_SKIP and not x.startswith(".") and not x.endswith(".wt")]
+        if level >= depth:
+            dirs[:] = []
+    return found
+
+
+def index_row(repo):
+    d = os.path.join(repo, ".project-map")
+    m = load_json(os.path.join(d, "map.json"), {}) or {}
+    if validate(m):
+        return {"repo": repo, "name": os.path.basename(repo), "broken": True}
+    st = staleness(repo, d)
+    cur = next((x for x in m.get("milestones") or [] if x.get("status") == "current"), None)
+    rem = [x for x in m.get("remaining") or [] if x.get("status") != "done"]
+    bn = next((n for n in (m.get("chain") or {}).get("nodes") or [] if n.get("bottleneck")), None)
+    decisions = m.get("decisions") or []
+    return {
+        "repo": repo, "name": (m.get("project") or {}).get("name") or os.path.basename(repo),
+        "page": os.path.join(d, "index.html"), "headline": m.get("headline") or "",
+        "milestone": cur.get("name") if cur else "", "left": len(rem),
+        "bottleneck": bn.get("label") if bn else "", "waits": sum(1 for q in decisions if not q.get("deadline")),
+        "auto_defaults": sum(1 for q in decisions if q.get("deadline")),
+        "stuck": sum(1 for x in m.get("parts") or [] if x.get("status") == "stuck"),
+        "status": st["status"], "reason": st.get("reason") or "", "updated": m.get("generated_at") or st.get("last_render"),
+        "next": (m.get("next_step") or {}).get("title") or "", "owner": (m.get("next_step") or {}).get("owner") or "",
+        "auto": bool(load_config(d).get("auto")),
+    }
+
+
+def render_index(rows, root, style):
+    L = TEXT.get(style.get("lang") or "zh", TEXT["zh"])
+    zh = L is TEXT["zh"]
+    rows = sorted(rows, key=lambda x: (-x.get("waits", 0), -x.get("stuck", 0), x.get("status") != "stale",
+                                       str(x.get("updated") or "")), reverse=False)
+    cards = []
+    for x in rows:
+        href = "file://" + urllib.parse.quote(x.get("page", ""))
+        if x.get("broken"):
+            cards.append(f'<li class="row broken"><b>{html.escape(x["name"])}</b> <span>map.json '
+                         f'{"无效，重新画一张" if zh else "is invalid; redraw it"}</span></li>')
+            continue
+        chips = []
+        if x["waits"]:
+            chips.append(f'<span class="c you"><b>{x["waits"]}</b> {L["needs_you"]}</span>')
+        if x["stuck"]:
+            chips.append(f'<span class="c stuck"><b>{x["stuck"]}</b> {L["stuck"]}</span>')
+        stale = x["status"] == "stale"
+        chips.append(f'<span class="c {"old" if stale else "ok"}">'
+                     f'{("过时" if zh else "stale") if stale else ("最新" if zh else "fresh")}'
+                     f'{" · " + html.escape(x["reason"]) if stale and x["reason"] else ""}</span>')
+        if x["auto"]:
+            chips.append(f'<span class="c">{"自动更新" if zh else "auto"}</span>')
+        ms = (f'<p class="ms">{html.escape(x["milestone"])} · {"还剩" if zh else "left"} <b>{x["left"]}</b>'
+              f'{" · " + L["bottleneck"] + " " + html.escape(x["bottleneck"]) if x["bottleneck"] else ""}</p>')
+        nxt = (f'<p class="nx">{L["next_step"]}{" (" + L["owner_" + x["owner"]] + ")" if x["owner"] in OWNERS else ""}: '
+               f'{html.escape(x["next"])}</p>') if x["next"] else ""
+        cards.append(f'<li class="row"><a href="{html.escape(href, quote=True)}"><div class="top"><b>{html.escape(x["name"])}</b>'
+                     f'<span class="t">{fmt_time(x["updated"]) if x["updated"] else ""}</span></div>'
+                     f'<p class="hl">{html.escape(x["headline"])}</p>{ms}{nxt}<div class="chips">{"".join(chips)}</div></a></li>')
+    title = "所有项目" if zh else "All projects"
+    waiting = sum(x.get("waits", 0) for x in rows)
+    sub = (f'{len(rows)} 个项目 · {waiting} 件事等你 · {sum(1 for x in rows if x.get("status") == "stale")} 张地图过时'
+           if zh else f'{len(rows)} projects · {waiting} waiting on you · {sum(1 for x in rows if x.get("status") == "stale")} stale maps')
+    body = (f'<header><h1>{title}</h1><p class="sub">{html.escape(root)} · {sub}</p></header>'
+            f'<ul class="rows">{"".join(cards) or "<li>" + ("还没有地图" if zh else "No maps yet") + "</li>"}</ul>')
+    css = PAGE.split("<style>")[1].split("</style>")[0].format(accent=style["accent"]).split("*{box-sizing")[0]
+    return (f'<!doctype html><html lang="{"zh-CN" if zh else "en"}" data-theme="{html.escape(style["theme"])}"><head>'
+            f'<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{title} · you-are-here</title><style>{css}' + INDEX_CSS + '</style></head>'
+            f'<body><div class="wrap">{body}</div></body></html>')
+
+
+INDEX_CSS = """*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",system-ui,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:28px 16px 40px} h1{margin:0;font-size:26px} .sub{color:var(--mut);margin:4px 0 20px}
+.rows{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.row a{display:block;color:inherit;text-decoration:none;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.row a:hover,.row a:focus-visible{border-color:var(--accent);outline:none}
+.top{display:flex;justify-content:space-between;gap:12px} .top b{font-size:16px} .t{color:var(--dim);font-size:12px}
+.hl{margin:6px 0;font-size:15px} .ms,.nx{margin:2px 0;color:var(--mut);font-size:13px} .ms b{color:var(--fg)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.c{font-size:12px;border:1px solid var(--line);border-radius:999px;padding:1px 9px}
+.c.you{border-color:color-mix(in srgb,var(--stuck) 50%,var(--line))} .c.you b,.c.stuck b{color:var(--stuck)}
+.c.old{color:var(--prog)} .c.ok{color:var(--done)} .broken{color:var(--mut);padding:10px 16px}
+"""
+
+
+def cmd_index(a):
+    root = os.path.abspath(os.path.expanduser(a.root))
+    rows = []
+    for repo in find_maps(root, a.depth):
+        try:
+            rows.append(index_row(repo))
+        except Exception as e:  # one bad repo must not hide the others
+            rows.append({"repo": repo, "name": os.path.basename(repo), "broken": True, "error": repr(e)})
+    out = os.path.abspath(os.path.expanduser(a.out)) if a.out else os.path.join(
+        os.path.expanduser("~/.cache/you-are-here"), "index.html")
+    write_text(out, render_index(rows, root, load_style({})))
+    if a.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=1))
+    for x in rows:
+        if not x.get("broken"):
+            print(f"{x['name']}: {x['status']}, {x['waits']} waiting, {x['stuck']} stuck - {x['headline'][:70]}")
+    print(f"index: {out}")
+
+
 def cmd_summary(a):
     repo = repo_root(a.repo)
     d = os.path.abspath(a.out) if a.out else os.path.join(repo, ".project-map")
@@ -2270,7 +2393,18 @@ def cmd_style(a):
     print(f"({'saved to' if changed else 'stored at'} {STYLE_FILE}{'' if s else ', not set yet: using defaults'})")
 
 
+def utf8_console():
+    """Windows consoles default to a legacy code page; map text (Chinese, arrows) must still print."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if (stream.encoding or "").lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    utf8_console()
     ap = argparse.ArgumentParser(prog="pmap", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     for name, fn in (("collect", cmd_collect), ("validate", cmd_validate), ("render", cmd_render)):
@@ -2299,6 +2433,12 @@ def main():
     p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--out")
     p.set_defaults(fn=cmd_summary)
+    p = sp.add_parser("index", help="one page over every repo under a folder that has a map")
+    p.add_argument("root", nargs="?", default=".")
+    p.add_argument("--out", help="output HTML (default ~/.cache/you-are-here/index.html)")
+    p.add_argument("--depth", type=int, default=4, help="how deep to look for repos (default 4)")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_index)
     p = sp.add_parser("style")
     p.add_argument("--theme", choices=("dark", "light", "auto"))
     p.add_argument("--accent")

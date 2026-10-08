@@ -10,17 +10,17 @@ PMAP = os.path.join(os.path.dirname(__file__), "..", "plugins", "you-are-here", 
 
 
 def put(path, text, mode="w"):
-    with open(path, mode) as f:
+    with open(path, mode, encoding="utf-8") as f:
         f.write(text)
 
 
 def read(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
 def sh(*cmd, cwd=None, env=None, check=True):
-    p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+    p = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and p.returncode:
         raise AssertionError(f"{cmd} failed:\n{p.stdout}\n{p.stderr}")
     return p

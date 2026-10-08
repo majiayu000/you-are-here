@@ -37,7 +37,8 @@ MILESTONE = re.compile(r"\bgit\s+(commit|tag|merge|push)\b|\bgh\s+(pr\s+merge|re
 
 def payload():
     try:
-        data = json.loads(sys.stdin.read() or "{}")
+        raw = sys.stdin.buffer.read() if hasattr(sys.stdin, "buffer") else sys.stdin.read().encode()
+        data = json.loads(raw.decode("utf-8", "replace") or "{}")  # hosts send UTF-8, whatever the locale
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}

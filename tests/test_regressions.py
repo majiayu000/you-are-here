@@ -227,7 +227,7 @@ class Safety(unittest.TestCase):
 
             def go(_):
                 p = subprocess.run([sys.executable, PMAP, "render", r.dir, "--out", r.out],
-                                   capture_output=True, text=True, env=r.env)
+                                   capture_output=True, text=True, encoding="utf-8", env=r.env)
                 return p.returncode, p.stderr
             with concurrent.futures.ThreadPoolExecutor(6) as ex:
                 res = list(ex.map(go, range(12)))
@@ -240,6 +240,29 @@ class Safety(unittest.TestCase):
             self.assertEqual(len(os.listdir(os.path.join(r.out, "history"))), ok + 1)
             json.loads(read(os.path.join(r.out, "state.json")))
             self.assertFalse([f for f in os.listdir(r.out) if f.startswith(".tmp-") or f == ".lock"])
+
+
+class Index(unittest.TestCase):
+    def test_index_lists_repos_needing_you_first(self):
+        with tempfile.TemporaryDirectory() as t:
+            for name, waits in (("calm", 0), ("busy", 2)):
+                r = Repo(os.path.join(t, name))
+                r.commit("src/core.py", "x\n", "init")
+                m = copy.deepcopy(MAP)
+                m["project"]["name"] = name
+                m["headline"] = f"{name} headline"
+                m["decisions"] = [{"question": f"q{i}", "default": "no"} for i in range(waits)]
+                os.makedirs(os.path.join(r.dir, ".project-map"))
+                sh(sys.executable, PMAP, "collect", r.dir, "--no-gh", env=r.env)
+                put(os.path.join(r.dir, ".project-map", "map.json"), json.dumps(m))
+                sh(sys.executable, PMAP, "render", r.dir, env=r.env)
+            out = os.path.join(t, "all.html")
+            res = sh(sys.executable, PMAP, "index", t, "--out", out, "--json", env=r.env).stdout
+            rows = json.loads(res[:res.rindex("]") + 1])
+            self.assertEqual(sorted(x["name"] for x in rows), ["busy", "calm"])
+            page = read(out)
+            self.assertLess(page.index("busy headline"), page.index("calm headline"))  # needs-you first
+            self.assertIn("2</b>", page)
 
 
 class Remotes(unittest.TestCase):
@@ -298,7 +321,7 @@ class Remotes(unittest.TestCase):
 class Installer(unittest.TestCase):
     def run_install(self, home, *args, src=ROOT):
         return subprocess.run([sys.executable, os.path.join(src, "install.py"), *args],
-                              capture_output=True, text=True, env={**os.environ, "HOME": home})
+                              capture_output=True, text=True, encoding="utf-8", env={**os.environ, "HOME": home})
 
     def test_symlinked_source_is_idempotent_and_uninstalls(self):
         with tempfile.TemporaryDirectory() as t:
