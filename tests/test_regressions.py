@@ -294,6 +294,7 @@ class Remotes(unittest.TestCase):
         self.assertFalse([w for w in pmap.lint(dict(base, parts=[dict(p, open="not merged")])) if "progress" in w])
 
 
+@unittest.skipIf(os.name == "nt", "the installer links skills with symlinks")
 class Installer(unittest.TestCase):
     def run_install(self, home, *args, src=ROOT):
         return subprocess.run([sys.executable, os.path.join(src, "install.py"), *args],

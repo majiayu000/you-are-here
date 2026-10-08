@@ -1,0 +1,27 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+        python: ["3.8", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: git identity for test repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+          git config --global init.defaultBranch main
+      - name: unit tests
+        run: python -m unittest discover -s tests -v
+      - name: plugin manifests are valid JSON
+        run: python -c "import json,glob;[json.load(open(p)) for p in glob.glob('**/*.json', recursive=True) if '.git' not in p];print('ok')"

@@ -21,6 +21,7 @@ printf '%s\\n' "$0" "$@" > "$FAKE_LOG-tmp.$$" && mv "$FAKE_LOG-tmp.$$" "$FAKE_LO
 """
 
 
+@unittest.skipIf(os.name == "nt", "fake agent CLIs are POSIX shell scripts")
 class Hooks(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
