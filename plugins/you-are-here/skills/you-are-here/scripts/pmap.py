@@ -462,26 +462,33 @@ def collect_github(repo_arg, warnings):
 
 
 def github_delta(old, new):
-    """What changed on GitHub since the last rendered map: PRs, issues, default-branch CI."""
+    """Compare only GitHub collections that succeeded in both snapshots."""
+    comparable = {k for k in ("prs", "issues", "default_branch_runs")
+                  if old.get(k) is not None and new.get(k) is not None}
+    if not comparable:
+        return "unknown (no comparable GitHub collections)"
     out = {}
-    op = {p["number"]: p for p in old.get("prs") or []}
-    np_ = {p["number"]: p for p in new.get("prs") or []}
-    out["prs_opened"] = [f"#{n} {np_[n]['title']}" for n in sorted(np_.keys() - op.keys())]
-    out["prs_gone"] = [f"#{n} {op[n]['title']} (merged or closed)" for n in sorted(op.keys() - np_.keys())]
-    changed = []
-    for n in sorted(np_.keys() & op.keys()):
-        a, b = op[n], np_[n]
-        bits = [f"{k}: {a.get(k)} -> {b.get(k)}" for k in ("checks", "review", "merge_state", "draft") if a.get(k) != b.get(k)]
-        if bits:
-            changed.append(f"#{n}: " + "; ".join(bits))
-    out["prs_changed"] = changed
-    oi = {i["number"] for i in old.get("issues") or []}
-    ni = {i["number"]: i for i in new.get("issues") or []}
-    out["issues_opened"] = [f"#{n} {ni[n]['title']}" for n in sorted(ni.keys() - oi)]
-    out["issues_closed"] = [f"#{n}" for n in sorted(oi - ni.keys())]
-    seen = {r["id"] for r in old.get("default_branch_runs") or []}
-    out["new_ci_runs"] = [f"{r['workflow']} {r['sha']}: {r['conclusion'] or r['status']}"
-                          for r in new.get("default_branch_runs") or [] if r["id"] not in seen]
+    if "prs" in comparable:
+        op = {p["number"]: p for p in old["prs"]}
+        np_ = {p["number"]: p for p in new["prs"]}
+        out["prs_opened"] = [f"#{n} {np_[n]['title']}" for n in sorted(np_.keys() - op.keys())]
+        out["prs_gone"] = [f"#{n} {op[n]['title']} (merged or closed)" for n in sorted(op.keys() - np_.keys())]
+        changed = []
+        for n in sorted(np_.keys() & op.keys()):
+            a, b = op[n], np_[n]
+            bits = [f"{k}: {a.get(k)} -> {b.get(k)}" for k in ("checks", "review", "merge_state", "draft") if a.get(k) != b.get(k)]
+            if bits:
+                changed.append(f"#{n}: " + "; ".join(bits))
+        out["prs_changed"] = changed
+    if "issues" in comparable:
+        oi = {i["number"] for i in old["issues"]}
+        ni = {i["number"]: i for i in new["issues"]}
+        out["issues_opened"] = [f"#{n} {ni[n]['title']}" for n in sorted(ni.keys() - oi)]
+        out["issues_closed"] = [f"#{n}" for n in sorted(oi - ni.keys())]
+    if "default_branch_runs" in comparable:
+        seen = {r["id"] for r in old["default_branch_runs"]}
+        out["new_ci_runs"] = [f"{r['workflow']} {r['sha']}: {r['conclusion'] or r['status']}"
+                              for r in new["default_branch_runs"] if r["id"] not in seen]
     return {k: v for k, v in out.items() if v} or "no changes"
 
 
@@ -605,13 +612,17 @@ def collect(repo, d, no_gh):
                           "new_tags": sorted(set(tags) - set(baseline.get("tags") or [])) if "tags" in baseline else [],
                           "untouched_parts": [p.get("id") for p in prev_map.get("parts") or []
                                               if isinstance(p, dict) and p.get("id") not in hits]}
-        if facts.get("github") and baseline.get("github"):
-            facts["delta"]["github"] = github_delta(baseline["github"], facts["github"])
+        if facts.get("github"):
+            facts["delta"]["github"] = github_delta(baseline.get("github") or {}, facts["github"])
         if "plans" in baseline:
             facts["delta"]["plans"] = plan_delta(baseline["plans"], facts["plans"])
     # the baseline the *next* run compares against; promoted to baseline.json when this map is rendered
+    # Keep each last successful GitHub collection through failures/skips, but never copy stale
+    # data into current facts. An explicit empty list is successful and replaces the old list.
+    github_baseline = dict(baseline.get("github") or {})
+    github_baseline.update({k: v for k, v in (facts.get("github") or {}).items() if v is not None})
     dump_json(os.path.join(d, "pending_baseline.json"),
-              {"refs": ref_shas(repo), "tags": tags, "worktree_fp": fp, "github": facts.get("github"),
+              {"refs": ref_shas(repo), "tags": tags, "worktree_fp": fp, "github": github_baseline or None,
                "plans": [{k: p[k] for k in ("path", "done", "total")} for p in facts["plans"]]})
     facts["warnings"] = warnings
     dump_json(os.path.join(d, "facts.json"), facts)
