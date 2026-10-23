@@ -1363,7 +1363,8 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     # morning headline: one sentence, then what got better / worse / needs the user
     better = sum(1 for k, _ in change_lines if k == "done")
     worse = sum(1 for k, _ in change_lines if k == "stuck")
-    waiting = sum(1 for q in m.get("decisions") or [] if isinstance(q, dict))
+    answers = load_answers(out_dir_of(facts)) if facts else []
+    waiting = sum(1 for q in m.get("decisions") or [] if isinstance(q, dict) and not answer_for(q, answers))
     bn = next((n.get("label") for n in (m.get("chain") or {}).get("nodes") or [] if n.get("bottleneck")), None)
     chips = []
     if prev_time:
@@ -1522,7 +1523,6 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     unl = (f'<p class="unl"><span>{L["unblocks"]}</span> {r(ns["unblocks"])}</p>' if ns.get("unblocks") else "")
     side = [f'<section class="card next"><h2>{L["next_step"]}{who}</h2><p class="nt">{r(ns["title"])}</p>'
             f'<p>{r(ns.get("why") or "")}</p>{how}{unl}</section>']
-    answers = load_answers(out_dir_of(facts)) if facts else []
     if m.get("decisions"):
         qs = []
         for i, q in enumerate(m["decisions"]):
@@ -1616,7 +1616,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         foot.append(f'{L["warnings"]}：' + r("; ".join(facts["warnings"])))
     footer = "".join(f"<p>{x}</p>" for x in foot)
 
-    expiring = sum(1 for q in (m.get("decisions") or []) if q.get("deadline"))
+    expiring = sum(1 for q in (m.get("decisions") or []) if q.get("deadline") and not answer_for(q, answers))
     pin_bits = [f'<b>{html.escape(L["you_are_here"])}</b>']
     if bottleneck_label:
         pin_bits.append(f'<span>{r(bottleneck_label)}</span>')
@@ -2371,7 +2371,8 @@ def index_row(repo):
     cur = next((x for x in m.get("milestones") or [] if x.get("status") == "current"), None)
     rem = [x for x in m.get("remaining") or [] if x.get("status") != "done"]
     bn = next((n for n in (m.get("chain") or {}).get("nodes") or [] if n.get("bottleneck")), None)
-    decisions = m.get("decisions") or []
+    answers = load_answers(d)
+    decisions = [q for q in m.get("decisions") or [] if not answer_for(q, answers)]
     return {
         "repo": repo, "name": (m.get("project") or {}).get("name") or os.path.basename(repo),
         "page": os.path.join(d, "index.html"), "headline": m.get("headline") or "",
