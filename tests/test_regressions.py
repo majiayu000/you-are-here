@@ -266,6 +266,138 @@ class Notify(unittest.TestCase):
 
 
 class Index(unittest.TestCase):
+    def make_map(self, root, name, decisions):
+        r = Repo(os.path.join(root, name))
+        r.out = os.path.join(r.dir, ".project-map")
+        r.commit("src/core.py", "x\n", "init")
+        m = copy.deepcopy(MAP)
+        m["project"]["name"] = name
+        m["style"] = {"lang": "en"}
+        m["decisions"] = decisions
+        r.cycle(m)
+        return r
+
+    def test_saved_answers_update_counts_and_overview_order(self):
+        with tempfile.TemporaryDirectory() as t:
+            answered = self.make_map(t, "A-answered", [
+                {"id": "ship", "question": "Ship?", "default": "no"},
+                {"question": "Use compact layout?", "default": "no"},
+            ])
+            pending = self.make_map(t, "Z-pending", [
+                {"id": "review", "question": "Review?", "default": "no"},
+            ])
+            original_map = read(os.path.join(answered.out, "map.json"))
+            self.assertEqual(pmap.index_row(answered.dir)["waits"], 2)
+            answered.pmap("answer", "--id", "ship", "--answer", "yes")
+            self.assertEqual(pmap.index_row(answered.dir)["waits"], 1)
+            answered.pmap("answer", "--question", "Use compact layout?", "--answer", "yes")
+            # Answers take effect without requiring another render or changing map.json.
+            self.assertEqual(pmap.index_row(answered.dir)["waits"], 0)
+            answered.pmap("render")
+            self.assertEqual(read(os.path.join(answered.out, "map.json")), original_map)
+            self.assertEqual(read(os.path.join(answered.out, "index.html")).count('<li class="answered"'), 2)
+            out = os.path.join(t, "all.html")
+            res = sh(sys.executable, PMAP, "index", t, "--out", out, "--lang", "en", "--json",
+                     env=answered.env).stdout
+            rows = json.loads(res[:res.rindex("]") + 1])
+            self.assertEqual({x["name"]: x["waits"] for x in rows}, {"A-answered": 0, "Z-pending": 1})
+            self.assertEqual({x["status"] for x in rows}, {"fresh"})
+            page = read(out)
+            self.assertIn("2 projects · 1 waiting on you", page)
+            self.assertLess(page.index("Z-pending"), page.index("A-answered"))
+            self.assertEqual(page.count('<span class="c you">'), 1)
+            self.assertIn('<span class="c you"><b>1</b>', page)
+            self.assertEqual(pmap.index_row(pending.dir)["waits"], 1)
+
+    def test_project_headline_excludes_answered_decisions(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self.make_map(t, "headline", [
+                {"id": "manual", "question": "Manual?", "default": "no"},
+                {"question": "Another choice?", "default": "no"},
+                {"id": "auto", "question": "Compact layout?", "default": "no",
+                 "deadline": "2099-01-01T00:00:00+00:00", "reversible": True},
+            ])
+            self.assertIn('<span class="hl hl-you"><b>3</b>', read(os.path.join(r.out, "index.html")))
+            selections = [("--id", "manual"), ("--question", "Another choice?"), ("--id", "auto")]
+            for count, selection in enumerate(selections, 1):
+                r.pmap("answer", *selection, "--answer", "yes")
+                r.pmap("render")
+                page = read(os.path.join(r.out, "index.html"))
+                self.assertEqual(page.count('<li class="answered"'), count)
+                if count < 3:
+                    self.assertIn(f'<span class="hl hl-you"><b>{3 - count}</b>', page)
+                else:
+                    self.assertNotIn('<span class="hl hl-you">', page)
+
+    def test_saved_answers_exclude_only_matched_deadline_defaults(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self.make_map(t, "mixed", [
+                {"id": "manual", "question": "Manual?", "default": "no"},
+                {"question": "Still waiting?", "default": "no"},
+                {"id": "auto", "question": "Compact layout?", "default": "no",
+                 "deadline": "2099-01-01T00:00:00+00:00", "reversible": True},
+                {"question": "Light theme?", "default": "no",
+                 "deadline": "2099-01-01T00:00:00+00:00", "reversible": True},
+            ])
+            before = pmap.index_row(r.dir)
+            self.assertEqual((before["waits"], before["auto_defaults"]), (2, 2))
+            self.assertIn('<span>2 expiring</span>', read(os.path.join(r.out, "index.html")))
+            r.pmap("answer", "--id", "manual", "--answer", "yes")
+            r.pmap("answer", "--id", "auto", "--answer", "yes")
+            partial = pmap.index_row(r.dir)
+            self.assertEqual((partial["waits"], partial["auto_defaults"]), (1, 1))
+            r.pmap("render")
+            page = read(os.path.join(r.out, "index.html"))
+            self.assertIn('<span>1 expiring</span>', page)
+            self.assertNotIn('<span>2 expiring</span>', page)
+            r.pmap("answer", "--question", "Light theme?", "--answer", "yes")
+            after = pmap.index_row(r.dir)
+            self.assertEqual((after["waits"], after["auto_defaults"]), (1, 0))
+            r.pmap("render")
+            self.assertNotIn(' expiring</span>', read(os.path.join(r.out, "index.html")))
+
+    def test_index_reuses_id_or_trimmed_question_answer_matching(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self.make_map(t, "matching", [{"id": "choice", "question": "Keep layout?", "default": "no"}])
+            cases = [
+                ([{"id": "choice", "question": "Earlier wording?", "answer": "yes", "at": "2020-01-01T00:00:00Z"}], 0),
+                ([{"question": "  Keep layout?  ", "answer": "yes"}], 0),
+                ([{"id": "old-id", "question": "Keep layout?", "answer": "yes"}], 0),
+                ([{"id": "other", "question": "Unrelated?", "answer": "yes"}], 1),
+                ([{"id": "choice", "answer": "old"}, {"id": "choice", "answer": "new"}], 0),
+                ([None, 7, "junk", {}, {"id": "choice", "answer": ""}], 1),
+                ([{"id": "choice", "answer": "yes"}, {"id": "choice", "answer": ""}], 0),
+            ]
+            for answers, expected in cases:
+                with self.subTest(answers=answers):
+                    put(os.path.join(r.out, "answers.json"), json.dumps(answers))
+                    self.assertEqual(pmap.index_row(r.dir)["waits"], expected)
+                    r.pmap("render")
+                    page = read(os.path.join(r.out, "index.html"))
+                    self.assertEqual(page.count('<li class="answered"'), 1 - expected)
+                    self.assertEqual(page.count('<span class="hl hl-you">'), expected)
+                    if len(answers) == 2 and answers[1].get("answer") == "new":
+                        self.assertIn('<b class="def">new</b>', page)
+
+    def test_positional_answer_id_still_requires_question_for_no_id_decision(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self.make_map(t, "positional", [{"question": "Keep layout?", "default": "no"}])
+            entry = {"id": "d0", "answer": "yes"}
+            put(os.path.join(r.out, "answers.json"), json.dumps([entry]))
+            self.assertEqual(pmap.index_row(r.dir)["waits"], 1)
+            entry["question"] = "Keep layout?"
+            put(os.path.join(r.out, "answers.json"), json.dumps([entry]))
+            self.assertEqual(pmap.index_row(r.dir)["waits"], 0)
+
+    def test_index_keeps_pending_counts_for_unreadable_or_empty_answers(self):
+        with tempfile.TemporaryDirectory() as t:
+            r = self.make_map(t, "no-answers", [{"question": "Pending?", "default": "no"}])
+            self.assertEqual(pmap.index_row(r.dir)["waits"], 1)  # no answers.json
+            for contents in ("not JSON", "[]", "{}", "null", '"invalid entries"'):
+                with self.subTest(contents=contents):
+                    put(os.path.join(r.out, "answers.json"), contents)
+                    self.assertEqual(pmap.index_row(r.dir)["waits"], 1)
+
     def test_index_lists_repos_needing_you_first(self):
         with tempfile.TemporaryDirectory() as t:
             for name, waits in (("calm", 0), ("busy", 2)):
