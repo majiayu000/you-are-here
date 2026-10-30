@@ -529,6 +529,8 @@ class Index(unittest.TestCase):
                 page = read(os.path.join(r.out, "index.html"))
                 self.assertEqual(page.count('<li class="answered"'), count)
                 self.assertEqual(page.count('<li data-decision="'), 3 - count)
+                if count < 3:  # the brief counts only open decisions
+                    self.assertIn(f'<p class="nt">{3 - count} ', page)
 
     def test_saved_answers_exclude_only_matched_deadline_defaults(self):
         with tempfile.TemporaryDirectory() as t:
