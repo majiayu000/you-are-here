@@ -4,7 +4,8 @@
 The plugin (see README) is the usual route: it brings the skill, the subagent (Claude Code, Grok)
 and the hooks. This script covers what a plugin cannot, and plain-skill setups:
 
-  python3 install.py --codex-agent  the background subagent for Codex (plugins can't ship agents)
+  python3 install.py --codex-agent  the background subagent for Codex (plugins can't ship agents);
+                                   it uses the plugin's skill, so it updates with the plugin
   python3 install.py                skill only (symlinks), no plugin
   python3 install.py --all          skill + subagents + automation rules, no plugin
   python3 install.py --agents       subagent definitions only
@@ -179,9 +180,13 @@ def main():
         return
 
     if a.codex_agent and not (a.all or a.skills or a.agents or a.rules):
-        # the plugin already provides the skill; the agent just reads it from this checkout
+        # The plugin provides the skill, so the agent names it instead of a path: it then follows the
+        # installed plugin version, not this checkout (which may sit on another branch).
         dest, src, _, kind = agent_files()[1]
-        pl.write(dest, stamp(tmpl(src, SRC), kind))
+        text = tmpl(src, "{{SKILL_DIR}}").replace(
+            "Read {{SKILL_DIR}}/SKILL.md and follow it",
+            "Use the `you-are-here` skill from the you-are-here plugin (its SKILL.md path is in your skills list) and follow it")
+        pl.write(dest, stamp(text, kind))
         return
     picked = a.skills or a.agents or a.rules
     skills, agents, rules = (True, True, True) if a.all else (a.skills or not picked, a.agents, a.rules)

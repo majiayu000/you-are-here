@@ -12,7 +12,7 @@
       "name": "you-are-here",
       "source": "./plugins/you-are-here",
       "description": "A one-file HTML project map your coding agent keeps up to date: milestone track with 'you are here', blocker chain, part status, next step, decisions with defaults, and what changed overnight.",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "category": "productivity",
       "keywords": [
         "project-map",

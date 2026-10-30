@@ -38,7 +38,8 @@ codex plugin add you-are-here@you-are-here
 ```
 
 Then open `/hooks` in Codex once and trust the you-are-here hooks (until you do, Codex skips them).
-Codex plugins can't ship subagents, so add the background subagent from a checkout:
+Codex plugins can't ship subagents, so add the background subagent from a checkout. It uses the plugin's
+skill by name, so it follows plugin updates and the checkout can be deleted afterwards:
 
 ```sh
 git clone https://github.com/majiayu000/you-are-here && python3 you-are-here/install.py --codex-agent
