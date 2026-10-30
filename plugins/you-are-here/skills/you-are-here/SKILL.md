@@ -169,7 +169,8 @@ repos that need the user first. Use it when the user asks about all their projec
 
 Run `PMAP status <repo>` (git only, no network, no model). `fresh` → answer from
 `<out>/map.json`. `stale` or `none` → update the map first (incremental), then answer from it.
-By default, one new commit or one changed file makes the map stale. Background updates retain
+By default, one new commit or one changed file makes the map stale. When it says `severely behind`
+(20+ commits, or 3+ days with changes), do not quote the old map at all; refresh first. Background updates retain
 their existing interval limit; accurate freshness does not mean invoking the model on every edit.
 `fresh` describes only the Git check. If the answer depends on current PR, CI or issue status,
 run `collect` and reconcile those facts even when Git is fresh. The page displays separate Git

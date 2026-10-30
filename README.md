@@ -90,7 +90,7 @@ python3 <plugin>/skills/you-are-here/scripts/pmap.py auto on .   # or ask the ag
 | A session starts | Gives the agent a few lines from the map: headline, bottleneck, next step, open decisions, and whether the map is stale |
 | You ask "where are we?" | Tells the agent to answer from the map, or to refresh it first |
 | You start a long unattended run | Tells the agent to draw or refresh the map and offer `auto on` |
-| After `git commit`, `git tag`, `git push`, `gh pr merge` or `gh release create` | Checks whether the map is stale. With auto on, it starts a background refresh; otherwise it nudges the agent once |
+| After `git tag`, `git merge`, `gh pr merge` or `gh release create` (a plain commit or push is not a milestone) | Checks whether the map is stale. With auto on, it starts a background refresh; otherwise it nudges the agent once |
 | At the end of each turn | With auto on and a stale map, starts a background refresh |
 
 "Stale" is decided by git alone, with no network and no model: a single new commit, a new tag, or

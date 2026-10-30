@@ -9,7 +9,7 @@ any error ends quietly with exit 0.
 
 - SessionStart      hand the agent a short summary of the map and whether it is stale
 - UserPromptSubmit  "where are we?" -> answer from the map; "run overnight" -> draw/refresh first
-- PostToolUse       after commit / tag / merge / release: refresh when stale (background if auto)
+- PostToolUse       after a tag / merge / release: refresh when stale (background if auto)
 - Stop              end of a turn: refresh in the background when auto is on and the map is stale
 
 Background refreshes run the same agent CLI headless (claude -p / codex exec / grok -p), detached,
@@ -31,9 +31,13 @@ sys.path.insert(0, os.path.join(SKILL_DIR, "scripts"))
 WHERE = re.compile(r"where are we\b|what'?s (left|done)\??\s*$|how far (along )?are we|project (map|status)\b|"
                    r"status of the project|进度(到哪|怎么样|如何|怎样)|到哪(了|儿了|一步)|还剩(什么|多少|哪些)(没做|要做)?[？?]?\s*$|"
                    r"项目地图|画.{0,4}地图|做到哪", re.I)
-LONG = re.compile(r"overnight|while i('| a)m (asleep|sleeping|away|out)|keep going until|for (the next )?(few |several )?hours|"
-                  r"autonomous(ly)?|unattended|/goal\b|通宵|睡觉|一晚上|一整晚|长时间|自己(跑|干|做)|不用问我|我不在", re.I)
-MILESTONE = re.compile(r"\bgit\s+(commit|tag|merge|push)\b|\bgh\s+(pr\s+merge|release\s+create)\b")
+# A long run is something the user hands over, not a word like "hours" or "长时间" in a bug report.
+LONG = re.compile(r"overnight|while i('| a)m (asleep|sleeping|away|out)|keep going until|for the next (few |several |\d+ )?hours|"
+                  r"\bautonomously\b|\bunattended\b|/goal\b|"
+                  r"通宵|一整晚|今晚(你)?(一直|继续|自己)|我(要|先|去)?睡(觉)?了|睡觉(的时候|期间)|我不在(的时候|期间)|"
+                  r"不用问我|别问我|无人值守|长时间(自主|自己|无人)|自己(一直)?(跑|干|做)(下去|到底)", re.I)
+# Milestones as the rules name them (tag, merge, release); a plain commit or push is not one.
+MILESTONE = re.compile(r"\bgit\s+(tag|merge)\s+(?!-l\b|--list\b|--abort\b)\S|\bgh\s+(pr\s+merge|release\s+create)\b")
 
 
 def payload():
@@ -177,12 +181,34 @@ def start_refresh(repo, d, cfg, why, data=None):
     return f"you-are-here: map is stale ({why}); a background refresh started (log: {d}/bg.log)."
 
 
+def prompt_of(data):
+    return str(pick(data, "prompt", "user_prompt", "userPrompt") or "")
+
+
+def command_of(data):
+    ti = pick(data, "tool_input", "toolInput") or {}
+    cmd = ti.get("command") if isinstance(ti, dict) else ti
+    return " ".join(map(str, cmd)) if isinstance(cmd, list) else cmd if isinstance(cmd, str) else ""
+
+
+def relevant(event, data):
+    """Cheap pre-check before touching git: only these prompts and commands can lead anywhere."""
+    if event == "UserPromptSubmit":
+        prompt = prompt_of(data)
+        return bool(WHERE.search(prompt) or LONG.search(prompt))
+    if event == "PostToolUse":
+        return bool(MILESTONE.search(command_of(data)))
+    return True
+
+
 def main():
     if os.environ.get("YAH_BG") == "1":  # inside a background refresh: stay out of the way
         return
     event = sys.argv[1] if len(sys.argv) > 1 else ""
     data = payload()
     debug("in", event, host(data), json.dumps(data)[:800])
+    if not relevant(event, data):  # most prompts and commands: no git, no import
+        return
     import pmap
     repo = find_repo(pick(data, "cwd") or os.getcwd())
     if not repo:
@@ -198,7 +224,7 @@ def main():
         return
 
     if event == "UserPromptSubmit":
-        prompt = str(pick(data, "prompt", "user_prompt", "userPrompt") or "")
+        prompt = prompt_of(data)
         if WHERE.search(prompt):
             if has_map:
                 st = pmap.staleness(repo, d)
@@ -220,12 +246,6 @@ def main():
         return
 
     if event == "PostToolUse":
-        ti = pick(data, "tool_input", "toolInput") or {}
-        cmd = ti.get("command") if isinstance(ti, dict) else ti
-        if isinstance(cmd, list):
-            cmd = " ".join(map(str, cmd))
-        if not isinstance(cmd, str) or not MILESTONE.search(cmd):
-            return
         st = pmap.staleness(repo, d)
         if st["status"] != "stale":
             return

@@ -82,7 +82,7 @@ class Hooks(unittest.TestCase):
         text = self.hook("SessionStart")
         self.assertIn("you-are-here: project map", text)
         self.assertIn("fresh", text)
-        self.assertIn("Headline: Parser landed", text)
+        self.assertRegex(text, r"Headline \(as of [^)]+\): Parser landed")
         self.assertIn("Next step", text)
 
     def test_where_are_we(self):
@@ -100,6 +100,29 @@ class Hooks(unittest.TestCase):
         for t in ("三端验证进度是 1/3", "进度条颜色改一下", "把 progress bar 改成绿色", "这个函数还剩一个 bug"):
             self.assertFalse(yah_hook.WHERE.search(t), t)
 
+    def test_long_run_and_milestone_patterns_are_specific(self):
+        sys.path.insert(0, os.path.dirname(HOOK))
+        import yah_hook
+        for t in ("我去睡觉了你继续", "今晚你一直跑，不用问我", "keep going until all tests pass",
+                  "work on this for the next 3 hours", "我不在的时候你自己跑下去", "/goal ship v2"):
+            self.assertTrue(yah_hook.LONG.search(t), t)
+        for t in ("这个接口长时间没响应", "让它自己跑测试", "it has been failing for hours",
+                  "autonomous driving dataset", "睡觉前帮我看下", "我不在乎格式", "一晚上没睡好"):
+            self.assertFalse(yah_hook.LONG.search(t), t)
+        for c in ("git tag v1.2", "git merge feat/x", "gh pr merge 12", "gh release create v1"):
+            self.assertTrue(yah_hook.MILESTONE.search(c), c)
+        for c in ("git commit -m x", "git push", "git tag -l", "git merge --abort"):
+            self.assertFalse(yah_hook.MILESTONE.search(c), c)
+
+    def test_severely_stale_map_is_not_quoted_at_session_start(self):
+        self.draw_map()
+        for i in range(20):
+            self.r.commit("src/core.py", f"{i}\n", f"c{i}")
+        text = self.hook("SessionStart")
+        self.assertIn("too far behind to quote", text)
+        self.assertNotIn("Headline", text)
+        self.assertNotIn("Decision:", text)
+
     def test_long_run_suggests_map_and_auto(self):
         text = self.hook("UserPromptSubmit", {"prompt": "keep working on this overnight, don't ask me"})
         self.assertIn("auto on", text)
@@ -108,9 +131,10 @@ class Hooks(unittest.TestCase):
         self.draw_map()
         for i in range(5):
             self.r.commit("src/core.py", f"{i}\n", f"c{i}")
-        text = self.hook("PostToolUse", {"tool_name": "Bash", "tool_input": {"command": "git commit -m c4"}})
+        self.assertIsNone(self.hook("PostToolUse", {"tool_input": {"command": "git commit -m c4"}}))  # not a milestone
+        text = self.hook("PostToolUse", {"tool_name": "Bash", "tool_input": {"command": "git tag v0.2"}})
         self.assertIn("stale", text)
-        self.assertIsNone(self.hook("PostToolUse", {"tool_input": {"command": "git commit -m again"}}))  # debounced
+        self.assertIsNone(self.hook("PostToolUse", {"tool_input": {"command": "git merge feat"}}))  # debounced
         self.assertIsNone(self.hook("PostToolUse", {"tool_input": {"command": "ls"}}))
         self.assertEqual(self.calls(0.3), [])
 

@@ -2335,8 +2335,13 @@ def render(repo, d):
     print(f"html: {os.path.join(d, 'index.html')}")
 
 
+SEVERE_COMMITS = 20  # this far behind, the map's content no longer describes the project
+SEVERE_HOURS = 72
+
+
 def staleness(repo, d, commits_at=1, hours=12, files_at=1):
-    """Cheap staleness check (git only, no network, no model): status none | fresh | stale."""
+    """Cheap staleness check (git only, no network, no model): status none | fresh | stale.
+    A stale map is also `severe` when it is far enough behind that its content should not be quoted."""
     state = load_json(os.path.join(d, "state.json"), {}) or {}
     since = state.get("last_render")
     facts = load_json(os.path.join(d, "facts.json"), {}) or {}
@@ -2372,7 +2377,8 @@ def staleness(repo, d, commits_at=1, hours=12, files_at=1):
     age_h = (dt.datetime.now().astimezone() - dt.datetime.fromisoformat(since)).total_seconds() / 3600
     stale = (commits >= commits_at or bool(new_tags) or files >= files_at
              or ((commits or files) and age_h >= hours))
-    res.update(status="stale" if stale else "fresh", commits_since=commits, new_tags=new_tags,
+    severe = bool(stale and (commits >= SEVERE_COMMITS or ((commits or files) and age_h >= SEVERE_HOURS)))
+    res.update(status="stale" if stale else "fresh", severe=severe, commits_since=commits, new_tags=new_tags,
                worktree_changed=files, age_hours=round(age_h, 1))
     why = [f"{commits} new commits"] if commits else []
     why += [f"{files} files edited"] if files else []
@@ -2392,7 +2398,8 @@ def cmd_status(a):
         extra = f" ({res['reason']})" if res.get("reason") else ""
         since = res.get("last_render")
         external = fmt_time(res.get("github_collected_at")) or "not collected"
-        print(f"{res['status']}{extra} · git only" + (f" · last update {fmt_time(since)}" if since else "")
+        severe = " · severely behind, do not quote the map" if res.get("severe") else ""
+        print(f"{res['status']}{extra}{severe} · git only" + (f" · last update {fmt_time(since)}" if since else "")
               + f" · GitHub last collected: {external} (not checked by status)")
 
 
@@ -2523,6 +2530,13 @@ def cmd_auto(a):
     print(json.dumps(cfg))
 
 
+def pending_answer_lines(d):
+    """Decisions the user answered after the last render."""
+    since = (load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render") or ""
+    return [f"User answered (not yet on the map): {x.get('question')} -> {x.get('answer')}"
+            for x in load_answers(d) if (x.get("at") or "") >= since]
+
+
 def summary_text(repo, d, budget=1800):
     """A few lines about the current map, for hooks to hand to the agent at session start."""
     m = load_json(os.path.join(d, "map.json"))
@@ -2538,8 +2552,15 @@ def summary_text(repo, d, budget=1800):
                 if fail.get("paused") else f"Next automatic try no earlier than {fail.get('retry_after')}.")
         lines.append(f"Background refresh failed {fail.get('failures') or 1}x in a row "
                      f"(last {fail.get('finished_at')}): {fail['error']}. {then}")
+    as_of = fmt_time(st.get("last_render")) or "an unknown time"
+    if st.get("severe"):
+        lines.append(f"The map was last updated {as_of} and is too far behind to quote: do not treat its headline, "
+                     "PR/CI state, progress or decisions as current. Refresh it with the you-are-here skill before "
+                     "relying on it.")
+        lines += pending_answer_lines(d)  # newer than the map, so still worth passing on
+        return "\n".join(lines)[:budget]
     if isinstance(m.get("headline"), str):
-        lines.append(f"Headline: {m['headline']}")
+        lines.append(f"Headline (as of {as_of}): {m['headline']}")
     cur = next((s.get("name") for s in m.get("milestones") or [] if isinstance(s, dict) and s.get("status") == "current"), None)
     rem = [r.get("label") for r in m.get("remaining") or [] if isinstance(r, dict) and r.get("status") != "done"]
     if cur:
@@ -2555,10 +2576,7 @@ def summary_text(repo, d, budget=1800):
             mode = f"default '{q.get('default')}' goes ahead {q.get('deadline')}" if q.get("deadline") and q.get("reversible") is True \
                 else f"waits for the user (default '{q.get('default')}')"
             lines.append(f"Decision: {q['question']} - {mode}")
-    since = (load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render") or ""
-    for x in load_answers(d):
-        if (x.get("at") or "") >= since:
-            lines.append(f"User answered (not yet on the map): {x.get('question')} -> {x.get('answer')}")
+    lines += pending_answer_lines(d)
     stuck = [p.get("name") for p in m.get("parts") or [] if isinstance(p, dict) and p.get("status") == "stuck"]
     if stuck:
         lines.append(f"Stuck: {', '.join(map(str, stuck))}")
