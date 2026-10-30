@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from html.parser import HTMLParser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -55,6 +56,125 @@ class Repo:
         self.pmap("render")
 
 
+class MapMeaning(unittest.TestCase):
+    def test_remaining_ids_are_required_and_unique(self):
+        m = copy.deepcopy(MAP)
+        m["remaining"][0].pop("id")
+        self.assertTrue(any("remaining[0].id" in e for e in pmap.validate(m)))
+        m = copy.deepcopy(MAP)
+        m["remaining"][1]["id"] = m["remaining"][0]["id"]
+        self.assertTrue(any("duplicate" in e for e in pmap.validate(m)))
+
+    def test_remaining_rename_remove_and_explicit_completion(self):
+        old = copy.deepcopy(MAP)
+        renamed = copy.deepcopy(old)
+        renamed["remaining"][0]["label"] = "finish parser"
+        _, changes = pmap.diff_maps(old, renamed)
+        self.assertFalse(any(kind in ("done", "new") for kind, _ in changes))
+        removed = copy.deepcopy(old)
+        removed["remaining"].pop(0)
+        _, changes = pmap.diff_maps(old, removed)
+        self.assertIn(("not_started", "剩余项: parser: 已移除"), changes)
+        completed = copy.deepcopy(old)
+        completed["remaining"][0]["status"] = "done"
+        _, changes = pmap.diff_maps(old, completed)
+        self.assertIn(("done", "剩余项: parser: 进行中 → 完成"), changes)
+
+    def test_progress_scope_change_is_not_completion(self):
+        old = copy.deepcopy(MAP)
+        old["parts"][0].update(status="done", progress={"done": 46, "total": 46, "label": "tests"})
+        new = copy.deepcopy(old)
+        new["parts"][0]["progress"] = {"done": 6, "total": 6, "label": "CI environments"}
+        _, changes = pmap.diff_maps(old, new)
+        self.assertEqual(len(changes), 1)
+        self.assertNotEqual(changes[0][0], "done")
+        self.assertIn("口径变化", changes[0][1])
+        self.assertIn("46/46 tests", changes[0][1])
+        self.assertIn("6/6 CI environments", changes[0][1])
+
+    def test_goal_can_be_undecided_and_done_items_are_not_remaining(self):
+        m = copy.deepcopy(MAP)
+        m["milestones"] = m["milestones"][:1]
+        m["remaining"] = []
+        m["chain"] = {"nodes": [], "edges": []}
+        self.assertEqual(pmap.validate(m), [])
+        page = pmap.render_html(m, {}, {}, [], {"theme": "dark", "accent": "#2dd4bf"}, None)
+        self.assertIn("下一目标未定", page)
+        self.assertNotIn(' id=here', page)
+        m = copy.deepcopy(MAP)
+        m["remaining"][0]["status"] = "done"
+        page = pmap.render_html(m, {}, {}, [], {"theme": "dark", "accent": "#2dd4bf"}, None)
+        self.assertIn('<strong class="big">1</strong>', page)
+
+    def test_replay_keeps_direction_only_changes(self):
+        for field, value in (("next_step", {"title": "review parser", "owner": "user"}),
+                             ("decisions", [{"question": "ship?", "default": "yes"}]),
+                             ("chain", {"nodes": [{"id": "b", "label": "release", "status": "stuck", "bottleneck": True}]})):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as history:
+                old = copy.deepcopy(MAP)
+                old["generated_at"] = "2026-10-12T10:00:00+08:00"
+                put(os.path.join(history, "old.json"), json.dumps(old))
+                new = copy.deepcopy(old)
+                new[field] = value
+                new["generated_at"] = "2026-10-13T10:00:00+08:00"
+                frames = pmap.build_frames(history, new)
+                self.assertEqual(len(frames), 2)
+                self.assertEqual(frames[0]["next_step"], old["next_step"])
+                self.assertEqual(frames[-1][field], value)
+                put(os.path.join(history, "z-new.json"), json.dumps(new))
+                repeated = pmap.build_frames(history, new)
+                self.assertEqual(len(repeated), 2)
+                self.assertEqual(repeated[-1]["changes"], frames[-1]["changes"])
+
+
+class DependencyMap(unittest.TestCase):
+    def page(self, m):
+        return pmap.render_html(m, {}, {}, [], dict(pmap.DEFAULT_STYLE), None)
+
+    def test_graph_visible_without_expanding_supporting_records(self):
+        class Outline(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.closed_details = 0
+                self.graphs = []
+                self.details = []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "details":
+                    closed = "open" not in attrs
+                    self.details.append(closed)
+                    self.closed_details += closed
+                if tag == "svg" and attrs.get("class") == "dependency-graph":
+                    self.graphs.append(self.closed_details)
+
+            def handle_endtag(self, tag):
+                if tag == "details":
+                    self.closed_details -= self.details.pop()
+
+        outline = Outline()
+        outline.feed(self.page(MAP))
+        self.assertEqual(outline.graphs, [0])
+
+    def test_parallel_branches_join_without_invented_sequence(self):
+        m = copy.deepcopy(MAP)
+        m["chain"] = {
+            "nodes": [{"id": x, "label": x, "status": "in_progress"} for x in "abcd"],
+            "edges": [{"from": a, "to": b, "kind": "evidence", "why": "acceptance plan"}
+                      for a, b in [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]],
+        }
+        page = self.page(m)
+        for a, b in [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]:
+            self.assertIn(f'data-from="{a}" data-to="{b}"', page)
+        self.assertNotIn('data-from="b" data-to="c"', page)
+        self.assertEqual(page.count('class="graph-edge e-evidence"'), 4)
+
+    def test_empty_dependencies_do_not_create_a_diagram(self):
+        m = copy.deepcopy(MAP)
+        m["chain"] = {"nodes": [], "edges": []}
+        self.assertNotIn('<svg class="dependency-graph"', self.page(m))
+
+
 class Worktree(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -68,6 +188,37 @@ class Worktree(unittest.TestCase):
         put(os.path.join(self.r.dir, "src", "core.py"), "y\n", "a")  # " M src/core.py" is the first line
         self.r.pmap("collect", "--no-gh")
         self.assertEqual(self.r.facts()["git"]["worktree"]["paths"], ["src/core.py"])
+
+    def test_single_edit_and_same_second_edit_make_map_stale(self):
+        self.r.cycle()
+        path = os.path.join(self.r.dir, "src/core.py")
+        put(path, "x = 2\n")
+        stamp = int(time.time()) * 10**9
+        os.utime(path, ns=(stamp, stamp))
+        self.assertEqual(pmap.staleness(self.r.dir, self.r.out)["status"], "stale")
+        self.r.cycle()
+        self.assertEqual(pmap.staleness(self.r.dir, self.r.out)["status"], "fresh")
+        put(path, "x = 3\n")  # same size, same second, still new work
+        os.utime(path, ns=(stamp + 1000000, stamp + 1000000))
+        self.assertEqual(pmap.staleness(self.r.dir, self.r.out)["status"], "stale")
+
+    def test_deleted_file_makes_clean_map_stale(self):
+        self.r.cycle()
+        os.remove(os.path.join(self.r.dir, "src/core.py"))
+        self.assertEqual(pmap.staleness(self.r.dir, self.r.out)["status"], "stale")
+        self.r.pmap("collect", "--no-gh")
+        self.assertEqual(self.r.facts()["delta"]["touched_parts"], {"core": 1})
+
+    def test_uncommitted_new_module_and_committed_paths_are_mapped_once(self):
+        self.r.cycle()
+        self.r.commit("misc.txt", "one\n", "new unmapped file")
+        put(os.path.join(self.r.dir, "misc.txt"), "two\n")
+        os.makedirs(os.path.join(self.r.dir, "new-module"))
+        put(os.path.join(self.r.dir, "new-module", "new.py"), "new\n")
+        self.r.pmap("collect", "--no-gh")
+        delta = self.r.facts()["delta"]
+        self.assertEqual(delta["unmapped_files"], ["misc.txt", "new-module/new.py"])
+        self.assertIn("new-module/new.py", delta["worktree_changed"])
 
     def test_uncommitted_edit_reaches_delta(self):
         self.r.cycle()
@@ -118,6 +269,43 @@ class Baseline(unittest.TestCase):
         self.r.cycle()
         self.r.pmap("collect", "--no-gh")
         self.assertEqual(self.r.facts()["git"]["commits"], [])
+
+    def test_skipped_github_collection_preserves_last_success(self):
+        self.r.cycle()
+        path = os.path.join(self.r.out, "baseline.json")
+        baseline = json.loads(read(path))
+        baseline["github"] = {"prs": [{"number": 7, "title": "still open"}], "issues": []}
+        put(path, json.dumps(baseline))
+        self.r.pmap("collect", "--no-gh")
+        self.assertNotIn("github", self.r.facts())
+        pending = json.loads(read(os.path.join(self.r.out, "pending_baseline.json")))
+        self.assertEqual(pending["github"], baseline["github"])
+        self.assertEqual(pmap.github_delta(baseline["github"], {"prs": None, "issues": []}), "no changes")
+        self.assertIn("unknown", pmap.github_delta(baseline["github"], {"prs": None}))
+        self.assertIn("prs_gone", pmap.github_delta(baseline["github"], {"prs": []}))
+
+    def test_rerender_preserves_last_change_and_next_update_advances_it(self):
+        self.r.cycle()
+        m = copy.deepcopy(MAP)
+        m["parts"][0]["status"] = "done"
+        m["parts"][0]["progress"]["done"] = 4
+        self.r.write_map(m)
+        self.r.pmap("render")
+        for i in range(9):  # more than the replay window
+            m["style"] = {"lang": "zh", "accent": "#ff8800"}
+            m["generated_at"] = f"2026-10-24T10:00:{i:02d}+08:00"
+            self.r.write_map(m)
+            output = self.r.pmap("render").stdout
+            self.assertIn("0/4 → 4/4", output)
+            self.assertIn("0/4 → 4/4", read(os.path.join(self.r.out, "index.html")))
+        frames = pmap.build_frames(os.path.join(self.r.out, "history"), m)
+        self.assertEqual(len(frames), 2)
+        self.assertTrue(frames[-1]["changes"])
+        m["parts"][1]["status"] = "in_progress"
+        self.r.write_map(m)
+        output = self.r.pmap("render").stdout
+        self.assertIn("Docs: 未开始 → 进行中", output)
+        self.assertNotIn("0/4 → 4/4", output)
 
     def test_lightweight_tag_on_old_commit(self):
         self.r.cycle()
@@ -317,17 +505,14 @@ class Index(unittest.TestCase):
                 {"id": "auto", "question": "Compact layout?", "default": "no",
                  "deadline": "2099-01-01T00:00:00+00:00", "reversible": True},
             ])
-            self.assertIn('<span class="hl hl-you"><b>3</b>', read(os.path.join(r.out, "index.html")))
+            self.assertEqual(read(os.path.join(r.out, "index.html")).count('<li data-decision="'), 3)  # open decisions
             selections = [("--id", "manual"), ("--question", "Another choice?"), ("--id", "auto")]
             for count, selection in enumerate(selections, 1):
                 r.pmap("answer", *selection, "--answer", "yes")
                 r.pmap("render")
                 page = read(os.path.join(r.out, "index.html"))
                 self.assertEqual(page.count('<li class="answered"'), count)
-                if count < 3:
-                    self.assertIn(f'<span class="hl hl-you"><b>{3 - count}</b>', page)
-                else:
-                    self.assertNotIn('<span class="hl hl-you">', page)
+                self.assertEqual(page.count('<li data-decision="'), 3 - count)
 
     def test_saved_answers_exclude_only_matched_deadline_defaults(self):
         with tempfile.TemporaryDirectory() as t:
@@ -375,7 +560,7 @@ class Index(unittest.TestCase):
                     r.pmap("render")
                     page = read(os.path.join(r.out, "index.html"))
                     self.assertEqual(page.count('<li class="answered"'), 1 - expected)
-                    self.assertEqual(page.count('<span class="hl hl-you">'), expected)
+                    self.assertEqual(page.count('<li data-decision="'), expected)
                     if len(answers) == 2 and answers[1].get("answer") == "new":
                         self.assertIn('<b class="def">new</b>', page)
 
@@ -397,6 +582,21 @@ class Index(unittest.TestCase):
                 with self.subTest(contents=contents):
                     put(os.path.join(r.out, "answers.json"), contents)
                     self.assertEqual(pmap.index_row(r.dir)["waits"], 1)
+
+    def test_answered_decisions_do_not_count_as_waiting_or_expiring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = Repo(tmp)
+            r.out = os.path.join(r.dir, ".project-map")
+            r.commit("src/core.py", "x\n", "init")
+            m = copy.deepcopy(MAP)
+            m["decisions"].append({"question": "merge?", "default": "wait"})
+            r.cycle(m)
+            before = pmap.index_row(r.dir)
+            self.assertEqual((before["waits"], before["auto_defaults"]), (1, 1))
+            put(os.path.join(r.out, "answers.json"), json.dumps([
+                {"question": q["question"], "answer": "no", "at": pmap.now_iso()} for q in m["decisions"]]))
+            after = pmap.index_row(r.dir)
+            self.assertEqual((after["waits"], after["auto_defaults"]), (0, 0))
 
     def test_index_lists_repos_needing_you_first(self):
         with tempfile.TemporaryDirectory() as t:

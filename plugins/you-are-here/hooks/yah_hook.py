@@ -15,6 +15,7 @@ any error ends quietly with exit 0.
 Background refreshes run the same agent CLI headless (claude -p / codex exec / grok -p), detached,
 one at a time per repo, at most once per `every_minutes`, and only after `pmap.py auto on`.
 """
+import contextlib
 import json
 import os
 import re
@@ -141,12 +142,21 @@ def refresh_command(agent, repo, d):
     exe = shutil.which("claude")
     allowed = [f"Bash(python3 {pm}:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)",
                "Bash(gh run view:*)", "Bash(gh pr view:*)", "Bash(gh issue view:*)", "Read", "Grep", "Glob",
-               f"Write({d}/**)", f"Edit({d}/**)"]
+               f"Edit({d}/**)"]  # Edit rules cover Write too; a Write(path) rule is ignored
     return exe and [exe, "-p", prompt, "--allowedTools", *allowed]
 
 
 def start_refresh(repo, d, cfg, why, data=None):
     """Detached headless refresh. Returns a short note for the agent, or None when skipped."""
+    import pmap
+    blocked = pmap.refresh_retry_blocked(d)
+    if blocked == "paused":
+        fail = pmap.refresh_failure(d) or {}
+        return (f"you-are-here: background refreshes are paused after {fail.get('failures')} failures in a row "
+                f"({fail.get('error')}). Fix the cause, then run `python3 {os.path.join(SKILL_DIR, 'scripts', 'pmap.py')} "
+                f"auto on {repo}`.")
+    if blocked:  # backing off after a failure; the session-start summary says when the next try is
+        return None
     if bg_running(d):
         return None
     if recent(os.path.join(d, ".bg.json"), cfg.get("every_minutes", 20)):
@@ -202,7 +212,7 @@ def main():
         elif LONG.search(prompt):
             emit(event, "you-are-here: before this long unattended run, draw or refresh the project map with the "
                         "you-are-here skill (start the you-are-here subagent in the background if you have one), "
-                        f"and turn on automatic refreshes with `{pm} auto on {repo}`. Put choices that need the user "
+                        f"Only if the user requested independent background refreshes, enable them with `{pm} auto on {repo}`. Put choices that need the user "
                         "into the map's decisions.")
         return
 
@@ -234,12 +244,34 @@ def main():
 
 
 def bg_run(repo, d, agent, cmd_json):
-    """Runs detached: the agent refresh, then a notification about the result."""
+    """Runs detached: the agent refresh, then a notification about the result.
+    A failure is recorded in refresh-result.json, which backs off and finally pauses later refreshes."""
     import pmap
     before = (pmap.load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render")
     cmd = json.loads(cmd_json)
-    code = subprocess.call(cmd, cwd=repo if agent != "codex" else d, stdin=subprocess.DEVNULL)
+    log = os.path.join(d, "bg.log")
+    start = os.path.getsize(log) if os.path.exists(log) else 0  # the agent writes to bg.log through our stdout
+    code, error = None, None
+    try:
+        code = subprocess.call(cmd, cwd=repo if agent != "codex" else d, stdin=subprocess.DEVNULL)
+    except OSError as exc:
+        error = f"could not start {agent}: {exc}"
+    after = (pmap.load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render")
     print(f"--- refresh exited {code}", flush=True)
+    if error or code != 0 or after == before or not after:
+        output = ""
+        try:
+            with open(log, encoding="utf-8", errors="replace") as f:
+                f.seek(start)
+                output = f.read()
+        except OSError:
+            pass
+        error = error or pmap.refresh_failure_error(agent, code, output)
+        print(f"--- error: {error}", flush=True)
+        print(f"--- notify: {pmap.record_refresh_failure(repo, d, agent, code, error)}", flush=True)
+        return
+    with contextlib.suppress(OSError):
+        os.remove(os.path.join(d, "refresh-result.json"))  # success: the failure count starts over
     print(f"--- notify: {pmap.notify_after_refresh(repo, d, before)}", flush=True)
 
 

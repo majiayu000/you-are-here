@@ -31,7 +31,8 @@ MAP = {
     "milestones": [{"name": "v0.1", "status": "done", "date": "2026-10-01"},
                    {"name": "v0.2", "status": "current", "proposed": True},
                    {"name": "v1", "status": "future"}],
-    "remaining": [{"label": "parser", "status": "in_progress"}, {"label": "docs", "status": "not_started"}],
+    "remaining": [{"id": "parser", "label": "parser", "status": "in_progress"},
+                  {"id": "docs", "label": "docs", "status": "not_started"}],
     "chain": {"nodes": [{"id": "a", "label": "parser", "status": "in_progress", "bottleneck": True},
                         {"id": "b", "label": "release", "status": "not_started"}],
               "edges": [{"from": "a", "to": "b", "kind": "inferred"}]},
@@ -74,6 +75,7 @@ class PmapTest(unittest.TestCase):
         facts = json.loads(read(os.path.join(self.out, "facts.json")))
         self.assertEqual(facts["git"]["commits"][0]["subject"], "init")
         self.assertIn("README.md", facts["git"]["doc_hints"])
+        self.assertIn("collected_at", facts["git"])
         self.assertFalse(os.path.exists(os.path.join(self.repo, ".project-map")))
 
         self.write_map(MAP)
@@ -97,9 +99,9 @@ class PmapTest(unittest.TestCase):
         m2["parts"][0].update(status="done", progress={"done": 4, "total": 4, "label": "tasks"})
         self.write_map(m2)
         r = self.pmap("render")
-        self.assertIn("changes since last render: 1", r.stdout)
+        self.assertIn("changes since previous content update: 1", r.stdout)
         page = read(os.path.join(self.out, "index.html"))
-        self.assertIn('class="part pt-done changed linkable"', page)
+        self.assertIn('class="part done pt-done changed linkable"', page)
         self.assertIn("0/4 → 4/4", page)
 
     def test_status(self):
@@ -111,11 +113,14 @@ class PmapTest(unittest.TestCase):
         self.assertTrue(self.pmap("status").stdout.startswith("fresh"))
         sh("git", "-C", self.repo, "commit", "-q", "--allow-empty", "-m", "c2",
            env={**self.env, "GIT_COMMITTER_DATE": "2099-01-01T00:00:00+00:00"})
-        self.assertTrue(self.pmap("status").stdout.startswith("fresh"))  # 1 commit < 5, age < 12h
+        self.assertTrue(self.pmap("status").stdout.startswith("stale"))  # one commit can change the next step
         sh("git", "-C", self.repo, "tag", "v9")
         r = self.pmap("status", "--json")
         st = json.loads(r.stdout)
         self.assertEqual(st["status"], "stale")
+        self.assertEqual(st["scope"], "git")
+        self.assertIsNone(st["github_collected_at"])
+        self.assertIn("git only", self.pmap("status").stdout)
         self.assertEqual(st["new_tags"], ["v9"])
 
     def test_worktree_and_chain_delta(self):
@@ -130,12 +135,12 @@ class PmapTest(unittest.TestCase):
         m2 = json.loads(json.dumps(MAP))
         m2["chain"]["nodes"][0]["bottleneck"] = False
         m2["chain"]["nodes"][1].update(bottleneck=True, status="stuck")
-        m2["remaining"] = m2["remaining"][1:]
+        m2["remaining"][0]["status"] = "done"
         self.write_map(m2)
         out = self.pmap("render").stdout
         self.assertIn("parser → release", out)        # bottleneck moved
         self.assertIn("release: 未开始 → 卡住", out)   # chain node status
-        self.assertIn("parser ✓", out)                 # remaining item done
+        self.assertIn("parser: 进行中 → 完成", out)     # explicit completion
         self.pmap("collect", "--no-gh")                # baseline promoted: no worktree change now
         dl = json.loads(read(os.path.join(self.out, "facts.json")))["delta"]
         self.assertEqual(dl["worktree_changed"], [])
@@ -168,7 +173,7 @@ class PmapTest(unittest.TestCase):
         self.write_map(bad)
         r = self.pmap("render", check=False)
         self.assertEqual(r.returncode, 1)
-        for frag in ("waiting_on", "evidence[] or mark inferred", "exactly one", "edges[0].why"):
+        for frag in ("waiting_on", "evidence[] or mark inferred", "at most one", "edges[0].why"):
             self.assertIn(frag, r.stdout)
 
     def test_page_interactions(self):
@@ -200,8 +205,9 @@ class PmapTest(unittest.TestCase):
         self.assertIn("notes/x.md", page)
         self.assertIn("chain-alt", page)
         self.assertIn("prefers-reduced-motion", page)
-        self.assertIn("<h3>the parser</h3>", page)
-        self.assertIn('class="done-row"', page)
+        self.assertIn('<p class="wait">the parser</p>', page)
+        self.assertIn('id="part-dialog"', page)
+        self.assertNotIn('class="done-row"', page)
         self.assertIn('data-kind="file"', page)
         self.assertRegex(page, r'<time data-deadline="2026-10-08T10:00:00\+08:00">10-08 \d\d:00</time>')  # local time
         m["parts"][1]["status"] = "in_progress"  # a second, different snapshot in the same second

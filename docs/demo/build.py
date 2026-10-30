@@ -42,9 +42,9 @@ MORNING = {
         {"name": "1.0", "status": "future", "proposed": True},
     ],
     "remaining": [
-        {"label": "PDF export", "status": "in_progress", "note": "2 files", "part": "export"},
-        {"label": "Sync conflicts", "status": "stuck", "note": "server clock", "part": "sync"},
-        {"label": "Onboarding", "status": "not_started", "part": "onboarding"},
+        {"id": "pdf-export", "label": "PDF export", "status": "in_progress", "note": "2 files", "part": "export"},
+        {"id": "sync-conflicts", "label": "Sync conflicts", "status": "stuck", "note": "server clock", "part": "sync"},
+        {"id": "onboarding", "label": "Onboarding", "status": "not_started", "part": "onboarding"},
     ],
     "chain": {
         "nodes": [
@@ -191,7 +191,7 @@ def build_overview(tmp, lumen_repo, lumen_out, env):
         m = {"project": {"name": name, "summary": o["summary"]}, "style": {"lang": "en"}, "headline": o["headline"],
              "generated_at": "2026-10-07T06:40:00+08:00",
              "milestones": [{"name": o["milestone"], "status": "current"}],
-             "remaining": [{"label": p[1], "status": p[2]} for p in o["parts"] if p[2] != "done"],
+             "remaining": [{"id": p[0], "label": p[1], "status": p[2]} for p in o["parts"] if p[2] != "done"],
              "chain": {"nodes": [{"id": p[0], "label": p[1], "status": p[2], "bottleneck": i == 0}
                                  for i, p in enumerate([p for p in o["parts"] if p[2] != "done"])], "edges": []},
              "parts": [dict({"id": p[0], "name": p[1], "status": p[2], "inferred": True},

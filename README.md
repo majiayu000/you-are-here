@@ -93,8 +93,9 @@ python3 <plugin>/skills/you-are-here/scripts/pmap.py auto on .   # or ask the ag
 | After `git commit`, `git tag`, `git push`, `gh pr merge` or `gh release create` | Checks whether the map is stale. With auto on, it starts a background refresh; otherwise it nudges the agent once |
 | At the end of each turn | With auto on and a stale map, starts a background refresh |
 
-"Stale" is decided by git alone, with no network and no model: new commits, a new tag, or edited
-files since the last map.
+"Stale" is decided by git alone, with no network and no model: a single new commit, a new tag, or
+one edited, deleted or untracked file since the last map. Automatic refreshes still respect their
+interval limit. Incremental collection includes new, uncommitted modules in its unmapped paths.
 
 Grok passes hook output to the model only after tool calls and at the end of a turn, so in Grok the
 map summary is not handed over at session start and "where are we?" goes through the skill. The
@@ -104,8 +105,11 @@ A background refresh runs the same agent you are using, headless and detached: `
 `codex exec` or `grok -p`. It is limited to one at a time per repo and to one every 20 minutes
 (`auto on --every 30` changes that). It writes only inside `.project-map/` and logs to
 `.project-map/bg.log`. When it finishes, you get a desktop notification (macOS, or `notify-send` on
-Linux) if a part got worse, a new decision needs you, or the refresh failed. In Claude Code and Grok you can also start the `you-are-here` subagent in
-the background from inside a session.
+Linux) if a part got worse, a new decision needs you, or the refresh failed. After a failure the
+next try waits twice as long each time (up to 6 hours); after 5 failures in a row, refreshes pause
+until you run `auto on` again. You get one notification for the first failure and one when they
+pause, with the reason (for example, that the agent CLI is not logged in). In Claude Code and Grok
+you can also start the `you-are-here` subagent in the background from inside a session.
 
 ## Rules the map follows
 
@@ -114,8 +118,19 @@ The same rules apply in every agent, so maps from Claude, Codex and Grok look an
 - The repo is read-only. The plugin and the agent write only `.project-map/`.
 - Every claim on a card links to evidence (a PR, a commit, a file, a CI run) or is marked
   *inferred*. Milestones the repo doesn't define are marked *proposed*.
-- **Done** means merged with nothing left to verify. The **bottleneck** is the earliest unfinished
-  step on the path to the next milestone, which is not always the stuck one.
+- **Done** means merged with nothing known left to verify. Previous verification remains evidence
+  until contradicted; missing a fresh check does not reopen completed work. A **bottleneck** needs
+  an evidenced dependency on the goal. When no next goal is established, the map says so.
+- Remaining items have stable IDs. Renaming or removing one does not count as completion; only
+  an explicit move to `done` does. A change in a progress count's unit is shown separately.
+- The header explains what the project does. The milestone track sits above all module cards;
+  completed modules stay visible in their original positions. Click a card for full details and
+  evidence. The next action leads the right column on desktop and comes first on mobile.
+- Replay preserves next steps, bottlenecks and decisions, even when no part changed status.
+  Re-rendering the same content preserves its last change highlights, including after styling edits.
+  Dependencies, commit history and uncertainties start collapsed.
+- `status` is a Git-only freshness check. The page shows separate Git and GitHub collection
+  times; current PR/CI claims require another collection even if Git is fresh.
 - A decision only goes ahead on its own when it is reversible and local, and it shows a countdown.
   Merges, pushes, releases, deletions and spending always wait for you.
 - If a hook or permission policy blocks a command, the agent stops and reports it. It never edits
@@ -155,6 +170,11 @@ those plans, not a replacement for them.
   agents to stop and report this, never to edit hook config.
 - **Background refresh did nothing.** Read `.project-map/bg.log`. Refreshes run only after
   `pmap.py auto on`, only when `pmap.py status` says `stale`, and at most once per interval.
+  `.project-map/refresh-result.json` holds the last failure, how many in a row, and when the next
+  try may start.
+- **"CLI is not logged in".** Background refreshes use the standalone CLI (`claude`, `codex`,
+  `grok`), which keeps its own login apart from the desktop apps. Log in once in a terminal (for
+  example `claude auth login`), then run `pmap.py auto on .` to retry right away.
 - **Debugging hooks.** Set `YAH_DEBUG=1` to log what each hook received and returned to
   `~/.cache/you-are-here/hook.log`.
 
@@ -170,3 +190,14 @@ Inspired by [@Voxyz_ai's project-map subagent idea](https://x.com/Voxyz_ai/statu
 ## License
 
 MIT
+
+
+### Token usage
+
+When requested, `scripts/session_stats.py` counts one Claude source session (including retained
+subagent logs) and one selected Codex Skill invocation. The page adds only two token totals with
+collapsed accounting details. Statistics come from a local script, without a model rereading the
+conversation. Ordinary map updates do not perform deep conversation analysis. See the skill's
+“Optional token usage” section for the command and boundaries.
+The current total is dated and matched to the map's collection time. A later collection without
+matching usage shows “Unavailable”; the prior invocation remains dated in the details.

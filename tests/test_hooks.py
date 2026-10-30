@@ -89,6 +89,8 @@ class Hooks(unittest.TestCase):
         self.assertIn("no project map yet", self.hook("UserPromptSubmit", {"prompt": "进度到哪了？"}))
         self.draw_map()
         self.assertIn("Answer from", self.hook("UserPromptSubmit", {"prompt": "Where are we?"}))
+        put(os.path.join(self.r.dir, "README.md"), "one important change\n")
+        self.assertIn("Update it", self.hook("UserPromptSubmit", {"prompt": "进度到哪了？"}))
 
     def test_where_pattern_is_specific(self):
         sys.path.insert(0, os.path.dirname(HOOK))
@@ -139,7 +141,8 @@ class Hooks(unittest.TestCase):
         self.assertIn("background refresh started", text)
         args = self.calls()[0]
         self.assertEqual(os.path.basename(args[0]), "claude")
-        self.assertIn(f"Write({self.out}/**)", args)
+        self.assertIn(f"Edit({self.out}/**)", args)  # Claude ignores Write(path) rules; Edit covers writes
+        self.assertFalse([a for a in args if a.startswith("Write(")])
         self.assertFalse([a for a in args if a in ("Write", "Edit", "Bash")])
 
     def test_host_from_payload(self):
@@ -199,6 +202,78 @@ class Hooks(unittest.TestCase):
             p = subprocess.run([sys.executable, HOOK, "PostToolUse"], input=stdin, capture_output=True, text=True, encoding="utf-8",
                                env=self.env(), cwd=self.r.dir)
             self.assertEqual((p.returncode, p.stdout), (0, ""))
+
+    def bg_run(self, code):
+        """Run the detached wrapper the way start_refresh does: agent output lands in bg.log."""
+        with open(os.path.join(self.out, "bg.log"), "a") as log:
+            subprocess.run([sys.executable, HOOK, "--bg-run", self.r.dir, self.out, "claude",
+                            json.dumps([sys.executable, "-c", code])], stdout=log, stderr=log, env=self.env(), check=True)
+        path = os.path.join(self.out, "refresh-result.json")
+        return json.loads(read(path)) if os.path.exists(path) else None
+
+    def notes(self):
+        path = os.path.join(self.tmp.name, "notes")
+        return read(path).splitlines() if os.path.exists(path) else []
+
+    def test_background_failure_backs_off_then_pauses(self):
+        from unittest.mock import patch
+        sys.path.insert(0, os.path.dirname(HOOK))
+        import yah_hook
+        self.draw_map()
+        self.pmap("auto", "on", self.r.dir)
+        result = self.bg_run("raise SystemExit(1)")
+        self.assertEqual((result["exit_code"], result["failures"], result["paused"]), (1, 1, False))
+        self.assertTrue(result["retry_after"])
+        self.assertEqual(len(self.notes()), 1)
+        self.assertIn("background refresh failed", self.notes()[0])
+        # inside the backoff window nothing starts, quietly
+        with patch.object(yah_hook.subprocess, "Popen") as launch:
+            self.assertIsNone(yah_hook.start_refresh(self.r.dir, self.out, {"auto": True, "every_minutes": 20}, "stale"))
+        launch.assert_not_called()
+        self.assertIn("failed 1x in a row", self.hook("SessionStart"))
+        # the wait doubles; retries are not notified again until they pause
+        result = self.bg_run("raise SystemExit(1)")
+        self.assertEqual(result["failures"], 2)
+        self.assertEqual(len(self.notes()), 1)
+        for _ in range(3):
+            result = self.bg_run("raise SystemExit(1)")
+        self.assertEqual((result["failures"], result["paused"], result["retry_after"]), (5, True, None))
+        self.assertEqual(len(self.notes()), 2)
+        self.assertIn("paused", self.notes()[1])
+        with patch.object(yah_hook.subprocess, "Popen") as launch:
+            message = yah_hook.start_refresh(self.r.dir, self.out, {"auto": True, "every_minutes": 0}, "stale")
+        launch.assert_not_called()
+        self.assertIn("paused after 5 failures", message)
+        self.assertIn("retries are paused", self.hook("SessionStart"))
+        # an explicit enable allows a new attempt
+        self.pmap("auto", "on", self.r.dir)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "refresh-result.json")))
+
+    def test_login_failure_says_how_to_log_in(self):
+        self.draw_map()
+        result = self.bg_run("print('Failed to authenticate: OAuth session expired and could not be refreshed'); "
+                             "raise SystemExit(1)")
+        self.assertIn("claude auth login", result["error"])
+        self.assertIn("claude auth login", self.notes()[0])
+
+    def test_success_clears_the_failure_count(self):
+        self.draw_map()
+        self.bg_run("raise SystemExit(1)")
+        pm = os.path.join(PLUGIN, "skills", "you-are-here", "scripts", "pmap.py")
+        time.sleep(1.1)  # last_render has one-second resolution
+        self.assertIsNone(self.bg_run(f"import subprocess, sys; subprocess.check_call([sys.executable, {pm!r}, "
+                                      f"'render', {self.r.dir!r}])"))
+
+    def test_zero_exit_without_map_update_is_failure(self):
+        from unittest.mock import patch
+        sys.path.insert(0, os.path.dirname(HOOK))
+        import yah_hook
+        self.draw_map()
+        with patch("pmap.notify_after_refresh", return_value=None):
+            yah_hook.bg_run(self.r.dir, self.out, "claude", json.dumps([sys.executable, "-c", "pass"]))
+        result = json.loads(read(os.path.join(self.out, "refresh-result.json")))
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn("did not update the map", result["error"])
 
     def test_hooks_json_points_at_the_script(self):
         cfg = json.loads(read(os.path.join(PLUGIN, "hooks", "hooks.json")))["hooks"]

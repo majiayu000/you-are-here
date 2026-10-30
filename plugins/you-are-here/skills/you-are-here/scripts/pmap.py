@@ -186,7 +186,7 @@ def tag_names(repo):
 
 def worktree(repo):
     """Porcelain status parsed with -z (exact paths), plus an mtime/size fingerprint per path."""
-    ok, raw = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=normal", strip=False)
+    ok, raw = git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all", strip=False)
     entries = []
     if ok and raw:
         toks = raw.split("\0")
@@ -201,12 +201,12 @@ def worktree(repo):
                 i += 1
             entries.append((code, path))
     fp = {}
-    for _, path in entries[:500]:
+    for code, path in entries[:500]:
         try:
             st = os.stat(os.path.join(repo, path))
-            fp[path] = [int(st.st_mtime), st.st_size]
+            fp[path] = [code, st.st_mtime_ns, st.st_size]
         except OSError:
-            fp[path] = None  # deleted
+            fp[path] = [code, None, None]  # a deletion still differs from an absent baseline entry
     summary = {"modified": sum(1 for c, _ in entries if c != "??"),
                "untracked": sum(1 for c, _ in entries if c == "??"),
                "paths": [p for _, p in entries[:60]]}
@@ -589,24 +589,24 @@ def collect(repo, d, no_gh):
              "mode": "incremental" if incremental else "initial",
              "since": state.get("last_render") if incremental else None}
     facts["git"] = g = collect_git(repo, baseline, state, incremental, warnings)
+    g["collected_at"] = now_iso()
     gh_repo = g.pop("_gh_repo")
     if gh_repo and not no_gh:
         facts["github"] = collect_github(gh_repo, warnings)
+        if any(v is not None for v in (facts["github"] or {}).values()):  # stamp only a collection that got something
+            facts["github"]["collected_at"] = now_iso()
     fp = g.pop("_worktree_fp")
     tags = tag_names(repo)
     facts["plans"] = collect_plans(repo)
     since_render = state.get("last_render")
     facts["answers"] = [x for x in load_answers(d) if not since_render or (x.get("at") or "") >= since_render]
     if incremental:
-        hits, unmapped = touched_parts(prev_map, g["changed_files"])
         old_fp = baseline.get("worktree_fp")
         if old_fp is not None:
             wt = sorted(p for p in fp.keys() | old_fp.keys() if fp.get(p) != old_fp.get(p))
-            wt_hits, _ = touched_parts(prev_map, wt)
-            for pid, n in wt_hits.items():
-                hits[pid] = hits.get(pid, 0) + n
         else:
             wt = None
+        hits, unmapped = touched_parts(prev_map, sorted(set(g["changed_files"]) | set(wt or [])))
         facts["delta"] = {"touched_parts": hits, "unmapped_files": unmapped[:80],
                           "worktree_changed": wt[:80] if wt is not None else "unknown (no baseline yet)",
                           "new_tags": sorted(set(tags) - set(baseline.get("tags") or [])) if "tags" in baseline else [],
@@ -748,9 +748,16 @@ def validate(m):
         if s.get("status") not in MS_STATUS:
             errs.append(f"{w}.status: one of {MS_STATUS}")
         cur += s.get("status") == "current"
-    if ms and cur != 1:
-        errs.append("milestones: exactly one must be status current")
+    if cur > 1:
+        errs.append("milestones: at most one may be status current")
+    remaining_ids = set()
     for i, r in dicts(m, "remaining", ""):
+        need(r, "id", f"remaining[{i}]")
+        rid = r.get("id")
+        if isinstance(rid, str):
+            if rid in remaining_ids:
+                errs.append(f"remaining[{i}].id: duplicate {rid}")
+            remaining_ids.add(rid)
         need(r, "label", f"remaining[{i}]")
         opt(r, "note", f"remaining[{i}]", str)
         if r.get("status") not in PART_STATUS:
@@ -870,8 +877,6 @@ def lint(m):
     if bns and first_open and bns[0] is not first_open and bns[0] in path:
         w.append(f"chain: bottleneck is '{bns[0]['label']}' but the earliest open node on the path is "
                  f"'{first_open['label']}'; nodes run left to right in the order they must finish")
-    if path and not bns and first_open:
-        w.append(f"chain: no bottleneck marked; it is usually '{first_open['label']}'")
     order = {n["id"]: i for i, n in enumerate(path)}
     for e in (m.get("chain") or {}).get("edges") or []:
         a, b = order.get(e.get("from")), order.get(e.get("to"))
@@ -969,36 +974,50 @@ def diff_maps(prev, cur):
         if o.get("status") != p.get("status"):
             bits.append(f"{L[o.get('status')]} → {L[p.get('status')]}")
         op, np_ = o.get("progress") or {}, p.get("progress") or {}
-        if np_ and (op.get("done"), op.get("total")) != (np_.get("done"), np_.get("total")):
+        if op and np_ and op.get("label", "") != np_.get("label", ""):
+            bits.append(f"{L['scope_changed']}: {op['done']}/{op['total']} {op.get('label', '')} → {np_['done']}/{np_['total']} {np_.get('label', '')}")
+        elif np_ and (op.get("done"), op.get("total")) != (np_.get("done"), np_.get("total")):
             bits.append(f"{op.get('done', '?')}/{op.get('total', '?')} → {np_['done']}/{np_['total']}")
         if bits:
             marks[p["id"]] = " · ".join(bits)
-            lines.append((p.get("status"), f"{p['name']}: {' · '.join(bits)}"))
+            kind = p["status"] if o.get("status") != p["status"] else "in_progress"
+            lines.append((kind, f"{p['name']}: {' · '.join(bits)}"))
     for pid, o in old.items():
         if pid not in {p["id"] for p in (cur.get("parts") or [])}:
             lines.append(("not_started", f"{o['name']}: {L['removed']}"))
     om = {s["name"]: s.get("status") for s in (prev.get("milestones") or [])}
     for s in (cur.get("milestones") or []):
         if s["name"] in om and om[s["name"]] != s.get("status"):
-            lines.append(("done", f"{L['milestone']} {s['name']}: {L['ms_' + om[s['name']]]} → {L['ms_' + s['status']]}"))
+            kind = "done" if s["status"] == "done" else "in_progress"
+            lines.append((kind, f"{L['milestone']} {s['name']}: {L['ms_' + om[s['name']]]} → {L['ms_' + s['status']]}"))
     def bottleneck(m):
         return next((n["label"] for n in ((m.get("chain") or {}).get("nodes") or []) if n.get("bottleneck")), None)
     ob, nb = bottleneck(prev), bottleneck(cur)
-    if ob != nb and nb:
-        lines.append(("stuck", f"{L['bottleneck']}: {ob or '—'} → {nb}"))
+    if ob != nb:
+        lines.append(("stuck" if nb else "in_progress", f"{L['bottleneck']}: {ob or '—'} → {nb or '—'}"))
     onodes = {n["id"]: n for n in ((prev.get("chain") or {}).get("nodes") or [])}
     for n in ((cur.get("chain") or {}).get("nodes") or []):
         o = onodes.get(n["id"])
         if o and o.get("status") != n.get("status") and n.get("status") in PART_STATUS and o.get("status") in PART_STATUS:
             lines.append((n["status"], f"{n['label']}: {L[o['status']]} → {L[n['status']]}"))
-    orem = {r["label"]: r.get("status") for r in (prev.get("remaining") or [])}
-    nrem = {r["label"]: r.get("status") for r in (cur.get("remaining") or [])}
-    for label in orem.keys() - nrem.keys():
-        lines.append(("done", f"{L['remaining']}: {label} ✓"))
-    for label in nrem.keys() - orem.keys():
-        lines.append(("new", f"{L['remaining']}: + {label}"))
-    if (prev.get("next_step") or {}).get("title") != (cur.get("next_step") or {}).get("title"):
+    # Only identified items provide comparable evidence; never infer completion from absence.
+    orem = {r["id"]: r for r in (prev.get("remaining") or []) if r.get("id")}
+    nrem = {r["id"]: r for r in (cur.get("remaining") or []) if r.get("id")}
+    for rid, old_item in orem.items():
+        if rid not in nrem:
+            lines.append(("not_started", f"{L['remaining']}: {old_item['label']}: {L['removed']}"))
+    for rid, item in nrem.items():
+        old_item = orem.get(rid)
+        if old_item is None:
+            lines.append(("new", f"{L['remaining']}: + {item['label']}"))
+        elif old_item.get("status") != item.get("status"):
+            lines.append((item["status"], f"{L['remaining']}: {item['label']}: {L[old_item['status']]} → {L[item['status']]}"))
+        elif old_item["label"] != item["label"]:
+            lines.append(("in_progress", f"{L['remaining']}: {old_item['label']} → {item['label']}"))
+    if prev.get("next_step") != cur.get("next_step"):
         lines.append(("in_progress", f"{L['next_step']}: {cur['next_step']['title']}"))
+    if prev.get("decisions") != cur.get("decisions"):
+        lines.append(("in_progress", f"{L['decisions']}: {L['changed']}"))
     return marks, lines
 
 
@@ -1006,12 +1025,14 @@ def diff_maps(prev, cur):
 
 TEXT = {
     "zh": {"done": "完成", "in_progress": "进行中", "not_started": "未开始", "stuck": "卡住",
+           "scope_changed": "口径变化", "goal_unknown": "下一目标未定", "collected": "采集", "not_collected": "未采集",
+           "suggested_order": "建议顺序", "replay_context": "当时的判断", "replay_hint": "回放保留当时的下一步、瓶颈和决策；组成部分的说明与证据仍为当前版本。",
            "ms_done": "已完成", "ms_current": "进行中", "ms_future": "未开始",
            "title": "项目地图", "updated": "更新", "commits_since": "次提交（自上次）", "commits_recent": "次近期提交",
            "you_are_here": "当前位置", "left_for": "距", "items": "项", "proposed": "提议", "inferred": "推断",
            "chain": "通往下一里程碑的阻塞链", "bottleneck": "当前瓶颈", "evidence_edge": "有证据的依赖",
            "inferred_edge": "推断的顺序", "no_edge": "未声明依赖", "other_deps": "其他依赖", "why": "依据",
-           "parts": "组成部分", "of_done": "完成", "next_step": "建议的下一步", "decisions": "需要你决定",
+           "parts": "项目全貌", "of_done": "已完成", "next_step": "建议的下一步", "decisions": "需要你决定",
            "default": "默认", "by": "截止", "changes": "自上次以来的变化", "first_run": "首次生成，暂无对比",
            "recent_commits": "最近提交", "uncertain": "不确定 / 推断", "details": "明细", "new": "新增",
            "removed": "已移除", "milestone": "里程碑", "waiting": "等待", "worktree": "工作区未提交",
@@ -1019,11 +1040,13 @@ TEXT = {
            "filter_all": "全部", "filter_moving": "在动", "filter_changed": "这次变了", "filter_inferred": "推断",
            "unmapped": "不在地图上", "accept": "接受默认", "override": "改口", "copied": "已复制",
            "expired": "已过期", "default_taken": "默认已生效", "see_path": "看另一条路", "hide_path": "收回这条路",
-           "done_quiet": "已完成", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
+           "part_detail": "当前模块详情", "close": "关闭", "collection": "采集依据", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
            "open_link": "在 GitHub 打开", "waits": "等你确认",
            "better": "变好", "worse": "变坏", "needs_you": "等你", "owner_user": "你来做", "owner_agent": "agent 来做",
            "unblocks": "做完解锁", "how": "怎么做", "open_left": "还差", "answered": "你已回答", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
+           "scope_changed": "Measure changed", "goal_unknown": "Next goal undecided", "collected": "collected", "not_collected": "not collected",
+           "suggested_order": "Suggested order", "replay_context": "At that time", "replay_hint": "Replay shows the next step, bottleneck and decisions from that snapshot; part descriptions and evidence remain current.",
            "ms_done": "Done", "ms_current": "In progress", "ms_future": "Later",
            "title": "Project map", "updated": "Updated", "commits_since": "commits since last", "commits_recent": "recent commits",
            "you_are_here": "You are here", "left_for": "Left for", "items": "", "proposed": "proposed", "inferred": "inferred",
@@ -1037,7 +1060,7 @@ TEXT = {
            "filter_all": "All", "filter_moving": "Moving", "filter_changed": "Changed", "filter_inferred": "Inferred",
            "unmapped": "Not on the map", "accept": "Accept default", "override": "Override", "copied": "Copied",
            "expired": "Expired", "default_taken": "Default stands", "see_path": "Show the other path",
-           "hide_path": "Hide the other path", "done_quiet": "Done", "scrub_then": "Then", "scrub_now": "Now",
+           "hide_path": "Hide the other path", "part_detail": "Current module details", "close": "Close", "collection": "Collection evidence", "scrub_then": "Then", "scrub_now": "Now",
            "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you",
            "better": "better", "worse": "worse", "needs_you": "need you", "owner_user": "You", "owner_agent": "Agent",
            "unblocks": "Unblocks", "how": "How", "open_left": "Still open", "answered": "You answered", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
@@ -1068,13 +1091,13 @@ class R:
         if self.web:
             base = html.escape(self.web, quote=True)
             t = re.sub(r"(?<![\w/&;])#(\d{1,6})\b",
-                       lambda m: f'<a href="{base}/issues/{m.group(1)}">#{m.group(1)}</a>', t)
+                       lambda m: f'<a href="{base}/issues/{m.group(1)}" target="_blank" rel="noopener">#{m.group(1)}</a>', t)
             t = re.sub(r"\b([0-9a-f]{7,12})\b",
-                       lambda m: f'<a href="{base}/commit/{m.group(1)}"><code>{m.group(1)}</code></a>'
+                       lambda m: f'<a href="{base}/commit/{m.group(1)}" target="_blank" rel="noopener"><code>{m.group(1)}</code></a>'
                        if m.group(1)[:7] in self.shas else m.group(0), t)
         slug = "/".join(self.web.rstrip("/").split("/")[-2:]) if self.web else None
         return re.sub(r"\x00(\d+)\x00", lambda m: (f'<a href="{html.escape(links[int(m.group(1))], quote=True)}" '
-                                                    f'title="{html.escape(links[int(m.group(1))], quote=True)}">'
+                                                    f'target="_blank" rel="noopener" title="{html.escape(links[int(m.group(1))], quote=True)}">'
                                                     f'{html.escape(short_url(links[int(m.group(1))], slug))}</a>'), t)
 
 
@@ -1103,7 +1126,10 @@ def cls(v, allowed, fallback):
 
 
 def badge(status, L):
-    return f'<span class="badge s-{status}">{L[status]}</span>'
+    visual = {"done": "done", "in_progress": "progress", "stuck": "blocked", "not_started": "todo"}[status]
+    label = ("已完成" if L is TEXT["zh"] else L[status]) if status == "done" else L[status]
+    icon = {"done": "✓ ", "in_progress": "◌ ", "stuck": '<i class="dot"></i>', "not_started": ""}[status]
+    return f'<span class="status {visual}">{icon}{label}</span>'
 
 
 def attr(s):
@@ -1268,38 +1294,85 @@ def nodes_for(nodes, decision_id, option_index):
 
 
 def chain_row(nodes, edges, L, r, by_id, by_name, alt=False):
-    edge_map = {(e["from"], e["to"]): e for e in edges}
-    items = []
-    for i, n in enumerate(nodes):
+    # Prerequisites occupy columns; parallel work shares a column. Only supplied
+    # edges become arrows, including branches and joins between non-neighbours.
+    ranks, columns = {}, {}
+    for n in nodes:
+        rank = max((ranks[e["from"]] + 1 for e in edges
+                    if e.get("to") == n["id"] and e.get("from") in ranks), default=0)
+        ranks[n["id"]] = rank
+        columns.setdefault(rank, []).append(n)
+    width, height, gap, row_gap, pad = 174, 126, 54, 36, 24
+    # Reserve enough lines for existing Chinese/Latin labels, instead of clipping
+    # longer real project descriptions to the dimensions of a short demo label.
+    for n in nodes:
+        label_units = sum(2 if ord(c) > 255 else 1 for c in n["label"])
+        sub_units = sum(2 if ord(c) > 255 else 1 for c in n.get("sub") or "")
+        height = max(height, 74 + ((label_units + 17) // 18) * 21 + ((sub_units + 23) // 24) * 17)
+    rows = max((len(col) for col in columns.values()), default=1)
+    canvas_w = (max(columns, default=0) + 1) * (width + gap) - gap + 2 * pad
+    canvas_h = rows * (height + row_gap) - row_gap + 2 * pad
+    positions = {}
+    for rank, col in columns.items():
+        top = pad + (rows - len(col)) * (height + row_gap) / 2
+        for row, n in enumerate(col):
+            positions[n["id"]] = (pad + rank * (width + gap), top + row * (height + row_gap))
+    marker = "chain-tip-alt" if alt else "chain-tip"
+    lines, items, detours = [], [], 0
+    for e in edges:
+        if e.get("from") not in positions or e.get("to") not in positions:
+            continue  # the other decision path has different nodes
+        ax, ay = positions[e["from"]]
+        bx, by = positions[e["to"]]
+        x1, y1, x2, y2 = ax + width, ay + height / 2, bx, by + height / 2
+        if ranks[e["to"]] == ranks[e["from"]] + 1:
+            mid = (x1 + x2) / 2
+            path = f"M{x1},{y1} C{mid},{y1} {mid},{y2} {x2},{y2}"
+        else:
+            detours += 1
+            bottom = canvas_h + detours * 22
+            path = f"M{x1},{y1} H{x1 + 18} V{bottom} H{x2 - 18} V{y2} H{x2}"
+        kind = cls(e.get("kind"), EDGE_KIND, "inferred")
+        why = e.get("why") or L["inferred_edge"]
+        lines.append(f'<path class="graph-edge e-{kind}" data-from="{attr(e["from"])}" '
+                     f'data-to="{attr(e["to"])}" d="{path}" marker-end="url(#{marker})">'
+                     f'<title>{html.escape(why)}</title></path>')
+    for n in nodes:
         st = cls(n.get("status"), PART_STATUS, "not_started")
         bn = f'<span class="bn">{html.escape(L["bottleneck"])}</span>' if n.get("bottleneck") else ""
         lid = link_of(n, by_id, by_name)
         link = f' data-link="{attr(lid)}"' if lid else ""
         iff = n.get("if") if isinstance(n.get("if"), dict) else None
         fork = " fork-only" if iff else (" fork-shared" if alt else "")
-        items.append(
-            f'<div class="node n-{st}{" is-bn" if n.get("bottleneck") else ""} linkable{fork}"{link} '
-            f'role="button" tabindex="0">{bn}<b>{r(n["label"])}</b><span>{r(n.get("sub") or "")}</span></div>')
-        if i < len(nodes) - 1:
-            e = edge_map.get((n["id"], nodes[i + 1]["id"]))
-            kind = cls(e["kind"], EDGE_KIND, "none") if e else "none"
-            why = (e.get("why") or "") if e else ""
-            pop = r(why) if why else html.escape(L["no_edge"])
-            items.append(f'<div class="arrow a-{kind}" title="{attr(why or L["no_edge"])}">'
-                         f'<p class="why-pop">{pop}</p><span></span></div>')
-    return "".join(items)
+        x, y = positions[n["id"]]
+        items.append(f'<foreignObject x="{x}" y="{y}" width="{width}" height="{height}">'
+            f'<div class="chain-node n-{st}{" is-bn" if n.get("bottleneck") else ""} linkable{fork}"{link} '
+            f'xmlns="http://www.w3.org/1999/xhtml" role="button" tabindex="0" '
+            f'data-node="{attr(n["id"])}">{bn}<span class="graph-state">{L[st]}</span>'
+            f'<b>{r(n["label"])}</b><span>{r(n.get("sub") or "")}</span></div></foreignObject>')
+    canvas_h += detours * 22 + (12 if detours else 0)
+    return (f'<svg class="dependency-graph" viewBox="0 0 {canvas_w} {canvas_h}" '
+            f'style="min-width:{min(canvas_w, max(640, canvas_w * .78)):.0f}px;max-width:{canvas_w}px" '
+            f'role="group" aria-label="{attr(L["chain"])}">'
+            f'<defs><marker id="{marker}" viewBox="0 0 10 10" refX="9" refY="5" '
+            f'markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z"/></marker></defs>'
+            f'{"".join(lines)}{"".join(items)}</svg>')
 
 
 def frame_from(m):
     parts = {}
     for p in m.get("parts") or []:
         pr = p.get("progress") or {}
-        parts[p["id"]] = {"status": p.get("status"), "done": pr.get("done"), "total": pr.get("total")}
+        parts[p["id"]] = {"status": p.get("status"), "done": pr.get("done"), "total": pr.get("total"), "label": pr.get("label")}
     return {
         "t": m.get("generated_at") or "",
         "label": fmt_time(m.get("generated_at")) if m.get("generated_at") else "",
         "parts": parts,
         "milestones": [{"name": s.get("name"), "status": s.get("status")} for s in m.get("milestones") or []],
+        "headline": m.get("headline") or "",
+        "next_step": m.get("next_step") or {},
+        "chain": m.get("chain") or {},
+        "decisions": m.get("decisions") or [],
         "changes": [],
     }
 
@@ -1314,23 +1387,82 @@ def build_frames(history_dir, current):
             prev = load_json(os.path.join(history_dir, name))
             if isinstance(prev, dict) and prev.get("parts"):
                 src.append(prev)
-    src = src[-7:] + [current]
+    src.append(current)
     frames, prev_m = [], None
     for item in src:
         fr = frame_from(item)
         if prev_m is not None:
             _, lines = diff_maps(prev_m, item)
             fr["changes"] = [t for _, t in lines]
-        same = frames and {k: frames[-1][k] for k in ("parts", "milestones")} == {k: fr[k] for k in ("parts", "milestones")}
+        fields = ("parts", "milestones", "headline", "next_step", "chain", "decisions")
+        same = frames and all(frames[-1][k] == fr[k] for k in fields)
         if same:
+            fr["changes"] = frames[-1]["changes"]
             frames[-1] = fr
         else:
             frames.append(fr)
         prev_m = item
-    return frames
+    return frames[-8:]  # bound distinct updates, not repeated renderings of the same map
 
 
-def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
+def render_analysis(report, lang, collected_at=None):
+    if not report:
+        return ""
+    def label(cn, en):
+        return cn if lang == "zh" else en
+    def esc(value):
+        return html.escape(str(value))
+    def count(value):
+        return f"{value:,}" if value is not None else label("未采集", "Unavailable")
+    def compact(value):
+        return f"{value / 10000:,.1f} 万" if value is not None and lang == "zh" and value >= 10000 else count(value)
+    source, saved_run = report['original'], report['skill_run']
+    # Collection belongs to an invocation; a later collect must not inherit its token count.
+    try:
+        start = dt.datetime.fromisoformat(saved_run['start'].replace('Z', '+00:00'))
+        end = dt.datetime.fromisoformat((saved_run.get('end') or report.get('generated_at')).replace('Z', '+00:00'))
+        collected = dt.datetime.fromisoformat(collected_at.replace('Z', '+00:00'))
+        current_run = start.replace(microsecond=0) <= collected <= end
+    except (KeyError, AttributeError, TypeError, ValueError):
+        current_run = False
+    run = saved_run if current_run else {**saved_run, 'usage_available': False, 'models': [], 'start': None, 'end': None}
+    def value(item, key):
+        return item['tokens'][key] if item.get('usage_available') else None
+    rows = []
+    for key, name in [('input', label("非缓存输入", "Uncached input")), ('cache_read', label("缓存读取", "Cache read")),
+                      ('cache_write', label("缓存写入", "Cache write")), ('output', label("输出（含推理）", "Output (includes reasoning)")),
+                      ('reasoning', label("其中：推理", "Of output: reasoning")), ('total', label("合计", "Total"))]:
+        rows.append(f'<tr><td>{name}</td><td>{count(value(source, key))}</td><td>{count(value(run, key))}</td></tr>')
+    models = [' · '.join(x['name'] for x in item['models']) or label("未采集", "Unavailable") for item in (source, run)]
+    rows.append(f'<tr><td>{label("模型", "Model")}</td><td>{esc(models[0])}</td><td>{esc(models[1])}</td></tr>')
+    rows.append(f'<tr><td>{label("统计区间", "Interval")}</td><td>{esc(fmt_time(source.get("start")))} → {esc(fmt_time(source.get("end")))}</td>'
+                f'<td>{esc(fmt_time(run.get("start")))} → {esc(fmt_time(run.get("end")))}</td></tr>')
+    notes = list(report.get('notes', []))
+    if not current_run:
+        previous = compact(saved_run['tokens']['total']) if saved_run.get('usage_available') else count(None)
+        recorded = fmt_time(saved_run.get('start')) or label("日期未知", "date unknown")
+        notes.append(label(f"上次 Skill 记录（{recorded}）：{previous} tokens；未匹配本次采集，本轮用量未采集。",
+                           f"Previous Skill record ({recorded}): {previous} tokens; it does not match this collection. Current usage is unavailable."))
+    elif not run.get('complete'):
+        notes.append(label("本轮尚未结束，用量仅截至统计时。", "This run is ongoing; usage is a snapshot."))
+    if run.get('counter_matches') is False:
+        notes.append(label("逐请求合计与回合累计值不一致，此处显示逐请求日志合计。", "Request sum differs from the turn counter; showing request records."))
+    if source.get('missing_usage_requests'):
+        notes.append(label(f"原会话 {source['missing_usage_requests']} 个响应缺少用量，未计入。", f"{source['missing_usage_requests']} original responses have no usage."))
+    original = label("原始会话", "Original session")
+    current = label("本轮 Skill 使用", "Current Skill run")
+    dated = f' · {esc(fmt_time(run.get("start")))}' if current_run else ''
+    return (f'<details class="session-usage" id="session-usage"><summary><b>{label("Token 用量", "Token usage")}</b>'
+            f'<span class="usage-preview">{original} <strong>{compact(value(source, "total"))}</strong>'
+            f'<span class="usage-divider">/</span>{current} <strong>{compact(value(run, "total"))}</strong>{dated}</span>'
+            f'<span class="usage-toggle">{label("明细", "Details")} ＋</span></summary>'
+            f'<div class="usage-content"><div class="tw"><table><thead><tr><th>{label("类型", "Type")}</th>'
+            f'<th>{original}{label("（含子任务）", " (includes subagents)")}</th><th>{current}</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></div><ul>{"".join(f"<li>{esc(x)}</li>" for x in notes)}</ul>'
+            f'<p class="usage-source">{esc(source["source"])}<br>{esc(saved_run["source"])}<br>turn_id: {esc(saved_run["turn_id"])}</p></div></details>')
+
+
+def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, analysis=None):
     L = labels(m)
     g = (facts or {}).get("git", {})
     slug = g.get("github")
@@ -1344,78 +1476,76 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     stray = unmapped_files(facts, parts)
     fork = fork_decision(m)
 
-    # header
-    meta = [f'{L["updated"]} <b>{fmt_time(m.get("generated_at") or now_iso())}</b>']
+    # The accepted demo layout: compact identity, a prominent route, then the overview.
+    def localized(zh, en):
+        return zh if L is TEXT["zh"] else en
+
+    collected = []
+    meta = [f'<span>{L["updated"]} <strong>{fmt_time(m.get("generated_at") or now_iso())}</strong></span>']
     if facts:
+        for name, source in (("Git", g), ("GitHub", facts.get("github") or {})):
+            stamp = source.get("collected_at")
+            collected.append(f'{name} {L["collected"]} <b>{r(fmt_time(stamp))}</b>' if stamp else f'{name} {L["not_collected"]}')
         n = len(g.get("commits", []))
-        meta.append(f'<b>{n}</b> {L["commits_since"] if facts.get("mode") == "incremental" else L["commits_recent"]}')
+        meta.append(f'<span><strong>{n}</strong> {L["commits_since"] if facts.get("mode") == "incremental" else L["commits_recent"]}</span>')
         wt = g.get("worktree", {})
         if wt.get("modified") or wt.get("untracked"):
-            meta.append(f'{L["worktree"]} <b>{wt.get("modified", 0) + wt.get("untracked", 0)}</b>')
+            meta.append(f'<span>{L["worktree"]} <strong>{wt.get("modified", 0) + wt.get("untracked", 0)}</strong></span>')
     if n_stuck:
-        meta.append(f'<span class="stuck-dot"></span><b class="c-stuck">{n_stuck} {L["stuck"]}</b>')
-    repo_link = (f' <a class="slug" href="{html.escape(web, quote=True)}">{html.escape(slug)}</a>'
-                 if slug and web else "")
-    head = (f'<header><h1>{r(P["name"])}<span class="sub">{L["title"]}</span></h1>'
-            f'<p class="summary">{r(P.get("summary", ""))}{repo_link}</p>'
-            f'<p class="meta">{" · ".join(meta)}</p></header>')
-
-    # morning headline: one sentence, then what got better / worse / needs the user
-    better = sum(1 for k, _ in change_lines if k == "done")
-    worse = sum(1 for k, _ in change_lines if k == "stuck")
-    answers = load_answers(out_dir_of(facts)) if facts else []
-    waiting = sum(1 for q in m.get("decisions") or [] if isinstance(q, dict) and not answer_for(q, answers))
-    bn = next((n.get("label") for n in (m.get("chain") or {}).get("nodes") or [] if n.get("bottleneck")), None)
-    chips = []
-    if prev_time:
-        chips.append(f'<span class="hl-since">{L["since_label"]} {fmt_time(prev_time)}</span>')
-    if better:
-        chips.append(f'<span class="hl hl-better"><b>{better}</b> {L["better"]}</span>')
-    if worse:
-        chips.append(f'<span class="hl hl-worse"><b>{worse}</b> {L["worse"]}</span>')
-    if waiting:
-        chips.append(f'<span class="hl hl-you"><b>{waiting}</b> {L["needs_you"]}</span>')
-    if bn:
-        chips.append(f'<span class="hl hl-bn">{L["bottleneck"]} · {r(bn)}</span>')
-    if prev_time and not change_lines:
-        chips.append(f'<span class="hl">{L["nothing_new"]}</span>')
+        meta.append(f'<span class="blocked-count"><i class="dot"></i>{n_stuck} {L["stuck"]}</span>')
+    repo_link = (f'<a class="demo-tag" href="{attr(web)}" target="_blank" rel="noopener">{html.escape(slug)} ↗</a>'
+                 if slug and web else f'<span class="demo-tag">{L["title"]}</span>')
+    head = (f'<div class="topline"><div class="brandline">'
+            '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
+            '<circle cx="12" cy="12" r="8.5" stroke="currentColor"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'
+            '<path d="M12 1v4M12 19v4M1 12h4M19 12h4" stroke="currentColor"/></svg>'
+            f'<span>YOU ARE HERE</span><span class="slash">/</span><span>{L["title"]}</span></div>{repo_link}</div>'
+            f'<header class="header"><div class="identity"><h1>{r(P["name"])}<span class="brand-dot">.</span></h1>'
+            f'<p class="summary">{r(P.get("summary", ""))}</p></div>'
+            f'<div class="meta">{"<span class=divider></span>".join(meta)}</div></header>')
     headline = m.get("headline")
-    hero = ""
-    if headline or chips:
-        hero = (f'<section class="hero">{f"<p class=hl-text>{r(headline)}</p>" if headline else ""}'
-                f'<div class="hl-row">{"".join(chips)}</div></section>')
 
-    # milestone track
-    track = ""
     ms = m.get("milestones") or []
-    if ms:
-        nodes = []
-        for i, s in enumerate(ms):
-            st = cls(s["status"], MS_STATUS, "future")
-            seg = ""
-            if i < len(ms) - 1:
-                nxt = ms[i + 1]["status"]
-                seg = f'<span class="seg {"solid" if nxt in ("done", "current") else "dotted"}"></span>'
-            prop = f'<span class="tag">{L["proposed"]}</span>' if s.get("proposed") else ""
-            here = f'<span class="here">{L["you_are_here"]}</span>' if st == "current" else ""
-            nodes.append(
-                f'<li class="ms ms-{st}" data-name="{attr(s["name"])}" data-now="{st}"'
-                f'{" id=here" if st == "current" else ""}>{here}<span class="dot"></span>{seg}'
-                f'<span class="ms-name">{r(s["name"])}</span>'
-                f'<span class="ms-note">{r(s.get("date") or L["ms_" + st])}{" · " + r(s["note"]) if s.get("note") else ""}</span>{prop}</li>')
-        rem = m.get("remaining") or []
-        cur_name = next((s["name"] for s in ms if s["status"] == "current"), "")
-        pills = []
-        for x in rem:
-            lid = link_of(x, by_id, by_name)
-            link = f' data-link="{attr(lid)}" role="button" tabindex="0"' if lid else ""
-            lk = " linkable" if lid else ""
-            pills.append(f'<span class="pill p-{cls(x["status"], PART_STATUS, "not_started")}{lk}"{link}><i></i>{r(x["label"])}'
-                         f'{"<em>" + r(x["note"]) + "</em>" if x.get("note") else ""}</span>')
-        pills = "".join(pills)
-        left = (f'<div class="left"><span class="big">{len(rem)}</span><span class="cap">{L["left_for"]} {r(cur_name)} {L["items"]}</span>'
-                f'<div class="pills">{pills}</div></div>') if rem else ""
-        track = f'<section class="card track"><ol class="ms-list">{"".join(nodes)}</ol>{left}</section>'
+    has_current = any(s["status"] == "current" for s in ms)
+    reached = max((i for i, stage in enumerate(ms) if stage["status"] == "done"), default=-1)
+    last_position = next((i for i, stage in enumerate(ms) if stage["status"] == "current"), reached)
+    nodes = []
+    for i, stage in enumerate(ms):
+        st = cls(stage["status"], MS_STATUS, "future")
+        reached_class = " reached" if not has_current and i == reached else ""
+        here_text = L["you_are_here"] if st == "current" else localized("已到这里", "Reached here")
+        date = stage.get("date") or ""
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            date = date[5:].replace("-", ".")
+        note = f'{L["ms_" + st]} · {date}' if date else L["ms_" + st]
+        prop = f'<span class="tag">{L["proposed"]}</span>' if stage.get("proposed") else ""
+        nodes.append(
+            f'<li class="milestone ms ms-{st} {st}{reached_class}" data-stage="{i}" '
+            f'data-name="{attr(stage["name"])}" data-now="{st}" role="button" tabindex="0" '
+            f'aria-haspopup="dialog" title="{attr(stage.get("note") or "")}"'
+            f'{" id=here" if st == "current" else ""}>'
+            f'<span class="here">{here_text}</span><span class="node">'
+            '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 12 4 4 8-9" '
+            'stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>'
+            f'<h2>{r(stage["name"])}</h2><p class="ms-note">{r(note)}</p>{prop}</li>')
+    rem = [x for x in m.get("remaining") or [] if x["status"] != "done"]
+    cur_name = next((stage["name"] for stage in ms if stage["status"] == "current"), "")
+    pills = []
+    for item in rem:
+        lid = link_of(item, by_id, by_name)
+        link = f' data-link="{attr(lid)}" role="button" tabindex="0"' if lid else ""
+        visual = {"in_progress": "progress", "stuck": "blocked"}.get(item["status"], "")
+        pills.append(f'<span class="pill {visual} p-{item["status"]}{" linkable" if lid else ""}"{link}>'
+                     f'<i class="dot"></i>{r(item["label"])}</span>')
+    remaining = (f'<div class="remaining"><span class="remaining-label">{L["left_for"]} {r(cur_name)} '
+                 f'<strong class="big">{len(rem)}</strong> {L["items"]}</span>{"".join(pills)}</div>') if rem else ""
+    if not has_current:
+        remaining = f'<div class="remaining goal-unknown"><span class="remaining-label">{L["goal_unknown"]}</span></div>' + remaining
+    offset = 50 / max(1, len(ms))
+    completed = max(0, last_position) / max(1, len(ms) - 1) * 100
+    track = (f'<section class="route track"><ol class="milestones" style="--stages:{max(1,len(ms))}">'
+             f'<li class="rail" role="presentation" aria-hidden="true" style="left:{offset}%;right:{offset}%;--completed:{completed}%"></li>'
+             f'{"".join(nodes)}</ol>{remaining}</section>') if ms else f'<section class="route">{remaining}</section>'
 
     # blocker chain. A decision with options splits a second, quieter path.
     chain = ""
@@ -1438,31 +1568,31 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
             sep = "：" if L is TEXT["zh"] else ": "
             alt_html = (f'<p class="fork-label">{html.escape(L["fork_if"])}{sep}{r(opts[other])}</p>'
                         f'<div class="chain chain-alt">{chain_row(alt_nodes, edges, L, r, by_id, by_name, alt=True)}</div>')
-        used = set()
-        for row in (main_nodes, alt_nodes):
-            used.update((row[i]["id"], row[i + 1]["id"]) for i in range(len(row) - 1))
         names = {n["id"]: n["label"] for n in cn}
         extra = []
         for e in edges:
             pair = (e.get("from"), e.get("to"))
-            if pair in used or pair[0] not in names or pair[1] not in names:
+            if pair[0] not in names or pair[1] not in names:
                 continue
             k = "evidence" if e.get("kind") == "evidence" else "inferred"
             sep = "：" if L is TEXT["zh"] else ": "
             extra.append(f'<li class="w-{k}"><b>{r(names[pair[0]])} → {r(names[pair[1]])}</b>'
-                         f' <span class="tag">{html.escape(L["other_deps"])}</span>{sep}{r(e.get("why", ""))}</li>')
-        extra_html = f'<ul class="why">{"".join(extra)}</ul>' if extra else ""
+                         f' <span class="tag">{html.escape(L["evidence_edge"] if k == "evidence" else L["inferred_edge"])}</span>'
+                         f'{sep}{r(e.get("why", ""))}</li>')
+        extra_html = (f'<details class="edge-evidence"><summary>{localized("关系依据", "Dependency evidence")} · {len(extra)}</summary>'
+                      f'<ul class="why">{"".join(extra)}</ul></details>') if extra else ""
         legend = (f'<div class="legend"><span><i class="lg-e"></i>{L["evidence_edge"]}</span>'
                   f'<span><i class="lg-i"></i>{L["inferred_edge"]}</span>'
                   f'<span><i class="lg-b"></i>{L["bottleneck"]}</span></div>')
-        chain = (f'<section class="card"><h2>{r(ch.get("title") or L["chain"])}</h2>'
-                 f'<div class="chain chain-default">{chain_row(main_nodes, edges, L, r, by_id, by_name)}</div>'
-                 f'{alt_html}{legend}{extra_html}</section>')
+        chain_title = L["chain"] if any(e.get("kind") == "evidence" for e in edges) else L["suggested_order"]
+        chain = (f'<section class="card chain-card"><h2>{r(ch.get("title") or chain_title)}</h2>'
+                 f'{legend}<div class="chain chain-default">{chain_row(main_nodes, edges, L, r, by_id, by_name)}</div>'
+                 f'{alt_html}<p class="graph-hint">{localized("可横向滑动查看完整路径 · 点击节点定位模块", "Scroll for the full path · select a node to locate its part")}</p>'
+                 f'{extra_html}</section>')
 
-    # parts. Quiet done cards collapse; a done card that changed overnight stays in the grid.
-    active, quiet = [], []
-    order = {"stuck": 0, "in_progress": 1, "not_started": 2, "done": 3}
-    for p in sorted(parts, key=lambda p: (order[p["status"]], parts.index(p))):
+    # Keep every part in the supplied order; reveal the full evidence on demand.
+    cards, part_details = [], []
+    for p in parts:
         prog = ""
         pr = p.get("progress")
         if pr:
@@ -1473,56 +1603,58 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
         inf = f'<span class="tag">{L["inferred"]}</span>' if p.get("inferred") else ""
         changed = p["id"] in marks
         stuck = p["status"] == "stuck" and p.get("waiting_on")
-        title = r(p["waiting_on"]) if stuck else r(p["name"])
-        eyebrow = f'<p class="eyebrow">{r(p["name"])}</p>' if stuck else ""
         summary = f'<p>{r(p.get("summary", ""))}</p>' if p.get("summary") else ""
         if p.get("open"):
             summary += f'<p class="open-left"><span>{L["open_left"]}</span> {r(p["open"])}</p>'
         infer = " data-inferred" if p.get("inferred") else ""
         pst = cls(p["status"], PART_STATUS, "not_started")
-        card = (f'<article class="part pt-{pst}{" changed" if changed else ""} linkable" '
+        brief = (p.get("waiting_on") if stuck else
+                 f'{L["open_left"]} {p["open"]}' if p.get("open") else p.get("summary", ""))
+        visual = {"done": "done", "in_progress": "progress", "stuck": "blocked", "not_started": "todo"}[pst]
+        card_badge = badge(pst, L)
+        meter = ""
+        if pr and pst != "done":
+            card_badge = card_badge.replace('</span>', f' · {pr["done"]}/{pr["total"]} {r(pr.get("label") or "")}</span>')
+            meter = (f'<div class="mini-progress" role="progressbar" aria-label="{attr(pr.get("label") or p["name"])}" '
+                     f'aria-valuemin="0" aria-valuemax="{pr["total"]}" aria-valuenow="{pr["done"]}">'
+                     f'<span style="width:{pct}%"></span></div>')
+        card = (f'<article class="part {visual} pt-{pst}{" changed" if changed else ""} linkable" '
                 f'data-link="{attr(p["id"])}" data-status="{pst}" data-now="{pst}"{infer} '
-                f'role="button" tabindex="0">'
-                f'<div class="ph">{badge(p["status"], L)}{inf}{chg}</div>{eyebrow}<h3>{title}</h3>'
-                f'{summary}{prog}<footer>{evidence_chips(p.get("evidence"))}</footer></article>')
-        if p["status"] == "done" and not changed:
-            quiet.append(card)
-        else:
-            active.append(card)
-    n_move = sum(p["status"] == "in_progress" for p in parts)
-    n_chg = sum(1 for p in parts if p["id"] in marks)
-    n_inf = sum(1 for p in parts if p.get("inferred"))
-    filters = (
-        f'<div class="filters" role="toolbar">'
-        f'<button type="button" data-filter="all" aria-pressed="true">{html.escape(L["filter_all"])}</button>'
-        f'<button type="button" data-filter="stuck" aria-pressed="false">{html.escape(L["stuck"])} <b>{n_stuck}</b></button>'
-        f'<button type="button" data-filter="in_progress" aria-pressed="false">{html.escape(L["filter_moving"])} <b>{n_move}</b></button>'
-        f'<button type="button" data-filter="changed" aria-pressed="false">{html.escape(L["filter_changed"])} <b>{n_chg}</b></button>'
-        f'<button type="button" data-filter="inferred" aria-pressed="false">{html.escape(L["filter_inferred"])} <b>{n_inf}</b></button>'
-        f'</div>')
+                f'role="button" tabindex="0" aria-haspopup="dialog">'
+                f'<span class="part-title"><h3>{r(p["name"])}</h3><span class="part-arrow">↗</span></span>'
+                f'{card_badge}{inf}{meter}<p class="part-note">{r(brief)}</p></article>')
+        cards.append(card)
+        wait = f'<p class="wait">{r(p["waiting_on"])}</p>' if stuck else ""
+        part_details.append(f'<template data-detail="{attr(p["id"])}"><h3>{r(p["name"])}</h3>'
+                            f'<div class="ph">{badge(p["status"], L)}{inf}{chg}</div>'
+                            f'{summary}{wait}{prog}<footer>{evidence_chips(p.get("evidence"))}</footer></template>')
+    highlight = (f'<button type="button" class="highlight-button" data-filter="changed" aria-pressed="false">'
+                 f'<i class="change-marker"></i>{localized("突出本轮变化", "Highlight changes")}</button>')
     stray_html = ""
     if stray:
         chips = "".join(f"<li><code>{html.escape(f)}</code></li>" for f in stray)
         stray_html = (f'<div class="unmap"><span class="tag">{html.escape(L["unmapped"])}</span>'
                       f'<ul class="plain">{chips}</ul></div>')
-    done_html = ""
-    if quiet:
-        names = "".join(
-            f'<button type="button" class="done-name" data-open="{attr(p["id"])}">{html.escape(p["name"])}</button>'
-            for p in parts if p["status"] == "done" and p["id"] not in marks)
-        done_html = (f'<details class="done-row"><summary>{html.escape(L["done_quiet"])} · {len(quiet)}</summary>'
-                     f'<div class="done-names">{names}</div><div class="parts">{"".join(quiet)}</div></details>')
-    parts_html = (f'<section><div class="sh"><h2>{L["parts"]}</h2></div>'
-                  f'{filters}{stray_html}<div class="parts">{"".join(active)}</div>{done_html}</section>')
+    n_done = sum(p["status"] == "done" for p in parts)
+    columns = 4 if len(parts) > 6 else 3
+    parts_html = (f'<section class="panel parts-panel"><div class="panel-heading"><div class="panel-title">'
+                  f'<h2>{L["parts"]}</h2><span class="completion"><strong>{n_done}</strong> / {len(parts)} {L["of_done"]}</span>'
+                  f'</div>{highlight}</div><div class="parts" style="--columns:{columns}">{"".join(cards)}</div>'
+                  f'<div class="parts-caption"><span class="legend"><i class="change-marker"></i>'
+                  f'{localized("青绿标记 = 本轮有变化", "Accent mark = changed this round")}</span>'
+                  f'<span>{localized("点击模块，查看任务与依据 ↗", "Click a part for tasks & evidence ↗")}</span></div></section>')
 
-    # sidebar
+    # Desktop actions occupy the right column; CSS places the next step first on mobile.
     ns = m["next_step"]
     owner = ns.get("owner") if ns.get("owner") in OWNERS else None
-    who = f'<span class="owner o-{owner}">{L["owner_" + owner]}</span>' if owner else ""
+    who = f'<span class="owner o-{owner}" title="{attr(L["owner_" + owner])}">↗</span>' if owner else ""
     how = (f'<p class="how"><span>{L["how"]}</span> {r(ns["action"])}</p>' if ns.get("action") else "")
     unl = (f'<p class="unl"><span>{L["unblocks"]}</span> {r(ns["unblocks"])}</p>' if ns.get("unblocks") else "")
-    side = [f'<section class="card next"><h2>{L["next_step"]}{who}</h2><p class="nt">{r(ns["title"])}</p>'
-            f'<p>{r(ns.get("why") or "")}</p>{how}{unl}</section>']
+    next_html = (f'<section class="panel action-panel next-panel next"><div class="eyebrow">{L["next_step"]}{who}</div><h2 class="nt">{r(ns["title"])}</h2>'
+                 f'<p>{r(ns.get("why") or "")}</p>'
+                 + (f'<details><summary>{L["how"]}</summary>{how}{unl}</details>' if how or unl else "") + "</section>")
+    side = [next_html]
+    answers = load_answers(out_dir_of(facts)) if facts else []
     if m.get("decisions"):
         qs = []
         for i, q in enumerate(m["decisions"]):
@@ -1566,7 +1698,10 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
                 f'<input type="text" maxlength="240" aria-label="{attr(L["override"])}">'
                 f'<button type="submit">{html.escape(L["copy"])}</button></form>'
                 f'<p class="hint">{html.escape(L["copy_hint"])}</p></li>')
-        side.append(f'<section class="card decide"><h2>{L["decisions"]}</h2><ul>{"".join(qs)}</ul></section>')
+        side.append(f'<section class="panel action-panel decision-panel decide"><div class="eyebrow">{L["decisions"]}</div><ul>{"".join(qs)}</ul></section>')
+    elif headline:
+        side.append(f'<section class="panel action-panel current-panel"><div class="eyebrow">{localized("当前进展", "Where things stand")}</div>'
+                    f'<h2>{r(headline)}</h2><p>{L["goal_unknown"] if not has_current else r(cur_name)}</p></section>')
     since = f'<span class="since">{fmt_time(prev_time)}</span>' if prev_time else ""
     if change_lines:
         rows = []
@@ -1578,7 +1713,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
             rows.append(f'<li class="{lk}"{link}><i class="dot-{cls(k, PART_STATUS + ("new",), "new")}"></i>{r(t)}</li>')
         cl = "".join(rows)
     else:
-        cl = f'<li class="muted">{L["first_run"]}</li>'
+        cl = f'<li class="muted">{L["nothing_new"] if prev_time else L["first_run"]}</li>'
     seen_subjects, commits = set(), []
     for c in ((facts or {}).get("git") or {}).get("commits") or []:
         if c.get("subject") in seen_subjects:
@@ -1588,14 +1723,18 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
     commits = commits[:6]
     cm = "".join(f'<li><span class="t">{fmt_time(c["date"])}</span> {r(c["sha"][:7])} {r(c["subject"])}</li>'
                  for c in commits)
-    side.append(f'<section class="card changes"><h2>{L["changes"]}{since}</h2><ul>{cl}</ul>'
-                + (f'<h3>{L["recent_commits"]}</h3><ul class="commits">{cm}</ul>' if cm else "") + "</section>")
-    if m.get("uncertain"):
-        side.append(f'<section class="card"><h2>{L["uncertain"]}</h2><ul class="plain">'
-                    + "".join(f"<li>{r(x)}</li>" for x in m["uncertain"]) + "</ul></section>")
+    side.append(f'<section class="panel changes-panel"><h2 class="eyebrow"><i class="change-marker"></i>{L["changes"]}</h2>'
+                f'<ul class="change-list">{cl}</ul>{since}</section>')
 
     # detail panels
     det = []
+    if m.get("uncertain"):
+        det.append(f'<details><summary><b>{L["uncertain"]} · {len(m["uncertain"])}</b></summary><ul class="plain">'
+                   + "".join(f"<li>{r(x)}</li>" for x in m["uncertain"]) + "</ul></details>")
+    if cm:
+        det.append(f'<details><summary><b>{L["recent_commits"]}</b></summary><ul class="commits">{cm}</ul></details>')
+    if headline and m.get("decisions"):
+        det.append(f'<p class="headline-note">{r(headline)}</p>')
     for p in m.get("panels") or []:
         if p["kind"] == "table":
             th = "".join(f"<th>{r(c)}</th>" for c in p.get("columns") or [])
@@ -1607,6 +1746,9 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
             body = f'<p>{r(p.get("text") or "")}</p>'
         det.append(f'<details{"" if p.get("collapsed", True) else " open"}><summary><b>{r(p["title"])}</b>'
                    f'<span>{r(p.get("hint", ""))}</span></summary>{body}</details>')
+    collection = " · ".join(collected)
+    if collection or stray_html:
+        det.append(f'<details><summary><b>{L["collection"]}</b></summary><p>{collection}</p>{stray_html}</details>')
     details = f'<section class="details"><h2>{L["details"]}</h2>{"".join(det)}</section>' if det else ""
 
     foot = []
@@ -1633,17 +1775,33 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None):
                  f'<input type="range" id="scrub" min="0" max="{len(use_frames) - 1}" value="{len(use_frames) - 1}" '
                  f'aria-label="{attr(L["changes"])}">'
                  f'<span>{html.escape(L["scrub_now"])}</span><span id="scrubcap"></span></div>')
+        title = "历史回放" if L is TEXT["zh"] else "History replay"
+        scrub = (f'<section class="details"><details class="history-details">'
+                 f'<summary><b>{title}</b></summary>{scrub}</details></section>')
     payload = {
         "slug": slug,
         "web": web,
         "answer_tpl": answer_text({"question": "{Q}"}, "{A}", "{ID}", facts),
         "peek": peek_db(facts),
+        "milestones": ms,
         "frames": use_frames,
-        "labels": {"expired": L["expired"], "open": L["open_link"]},
+        "labels": {k: L[k] for k in ("next_step", "bottleneck", "decisions", "default", "owner_user", "owner_agent", "how", "unblocks")},
     }
+    payload["labels"].update(expired=L["expired"], open=L["open_link"], part_detail=L["part_detail"],
+                             you_are_here=L["you_are_here"], reached=localized("已到这里", "Reached here"),
+                             milestone=localized("里程碑", "Milestone"))
     data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
-    body = (f'{pin}{head}{hero}{scrub}{track}{chain}<div class="grid"><div class="main">{parts_html}</div>'
-            f'<aside>{"".join(side)}</aside></div>{details}<footer class="foot">{footer}</footer>'
+    replay = (f'<section class="card replay-context" id="replay-context" hidden><h2>{L["replay_context"]}</h2>'
+              f'<p class="muted">{L["replay_hint"]}</p><div id="replay-text"></div></section>')
+    body = (f'{pin}{head}{track}{replay}<div class="workspace grid"><div class="main">{chain}{parts_html}</div>'
+            f'<aside class="aside">{"".join(side)}</aside></div>{render_analysis(analysis, "zh" if L is TEXT["zh"] else "en", (facts or {}).get("collected_at"))}'
+            f'<footer class="footer"><details class="sources"><summary>{localized("查看依据与历史", "Evidence & history")}</summary>'
+            f'<div class="source-content">{scrub}{details}<div class="foot">{footer}</div></div></details>'
+            f'<div class="signature">{localized("少一点追问，<span>多一点方向感。</span>", "Less chasing. <span>More direction.</span>")}</div></footer>'
+            f'{"".join(part_details)}<dialog id="part-dialog" aria-labelledby="part-detail-title"><div class="dialog-content">'
+            f'<div class="dialog-topline"><span class="eyebrow" id="part-detail-title">{L["part_detail"]}</span>'
+            f'<button type="button" class="close" id="close-part" aria-label="{L["close"]}">×</button></div>'
+            f'<div id="part-detail"></div></div></dialog>'
             f'<div id="peek" hidden role="dialog"><p id="peek-text"></p>'
             f'<a id="peek-link" target="_blank" rel="noopener" hidden></a></div>')
     page = PAGE.format(
@@ -1661,180 +1819,93 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
-:root{{--accent:{accent};--bg:#0e1013;--card:#16191e;--card2:#1b1f25;--line:#2a2f37;--fg:#e8eaed;--mut:#9aa2ad;--dim:#6b7380;
---done:#4ade80;--prog:#fbbf24;--stuck:#f87171;--todo:#6b7380;color-scheme:dark}}
-:root[data-theme=light]{{--bg:#f6f7f9;--card:#fff;--card2:#f1f3f6;--line:#dfe3e8;--fg:#14171c;--mut:#566070;--dim:#8a93a0;
---done:#16a34a;--prog:#b7791f;--stuck:#dc2626;--todo:#8a93a0;color-scheme:light}}
-@media (prefers-color-scheme:light){{:root[data-theme=auto]{{--bg:#f6f7f9;--card:#fff;--card2:#f1f3f6;--line:#dfe3e8;--fg:#14171c;
---mut:#566070;--dim:#8a93a0;--done:#16a34a;--prog:#b7791f;--stuck:#dc2626;--todo:#8a93a0;color-scheme:light}}}}
-*{{box-sizing:border-box}}
-body{{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",system-ui,sans-serif}}
-.wrap{{max-width:1240px;margin:0 auto;padding:28px 16px 40px}}
-a{{color:inherit;text-decoration:none;border-bottom:1px dotted var(--dim)}} a:hover{{color:var(--accent)}}
-code{{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--card2);padding:1px 5px;border-radius:4px}}
-h1{{font-size:28px;margin:0;letter-spacing:-.02em}} h1 .sub{{font-size:15px;color:var(--mut);font-weight:400;margin-left:12px}}
-h2{{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);margin:0 0 12px;font-weight:600}}
-h3{{margin:0}}
-.summary{{color:var(--mut);margin:6px 0 2px}} .slug{{margin-left:8px;font:12px ui-monospace,Menlo,monospace}}
-.meta{{color:var(--mut);margin:0 0 20px}} .meta b{{color:var(--fg)}} .c-stuck{{color:var(--stuck)!important}}
-.stuck-dot{{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--stuck);margin-right:6px}}
-.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:16px}}
-.tag{{font-size:11px;color:var(--mut);border:1px dashed var(--dim);border-radius:5px;padding:0 5px;margin-left:6px;white-space:nowrap}}
-/* milestone track */
-.track{{padding-top:22px}}
-.ms-list{{list-style:none;margin:0;padding:34px 4px 4px;display:flex;overflow-x:auto;scrollbar-width:thin}}
-.ms{{position:relative;flex:1 0 128px;display:flex;flex-direction:column;align-items:center;text-align:center;padding:0 6px}}
-.ms .dot{{width:30px;height:30px;border-radius:50%;border:2px solid var(--line);background:var(--card2);z-index:1;display:grid;place-items:center}}
-.ms-done .dot{{background:color-mix(in srgb,var(--done) 22%,var(--card));border-color:var(--done)}}
-.ms-done .dot::after{{content:"";width:9px;height:5px;border:solid var(--done);border-width:0 0 2.5px 2.5px;transform:rotate(-45deg) translate(1px,-1px)}}
-.ms-current .dot{{border-color:var(--accent);box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 18%,transparent)}}
-.ms-current .dot::after{{content:"";width:10px;height:10px;border-radius:50%;background:var(--accent)}}
-.seg{{position:absolute;top:14px;left:calc(50% + 17px);right:calc(-50% + 17px);height:3px;border-radius:2px}}
-.seg.solid{{background:var(--done)}} .seg.dotted{{background:repeating-linear-gradient(90deg,var(--dim) 0 3px,transparent 3px 9px);height:2px}}
-.ms-current .seg{{background:repeating-linear-gradient(90deg,var(--dim) 0 3px,transparent 3px 9px);height:2px}}
-.ms-name{{margin-top:10px;font-weight:600}} .ms-current .ms-name{{color:var(--accent)}}
-.ms-note{{font-size:12px;color:var(--mut)}} .ms-done .ms-note{{color:var(--done)}}
-.here{{position:absolute;top:-34px;background:var(--accent);color:#06221e;font-size:12px;font-weight:600;padding:3px 9px;border-radius:7px;white-space:nowrap}}
-.left{{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}}
-.big{{font-size:34px;font-weight:700;color:var(--accent);line-height:1}} .cap{{font-size:12px;letter-spacing:.06em;color:var(--mut);text-transform:uppercase}}
-.pills{{display:flex;flex-wrap:wrap;gap:8px}}
-.pill{{display:inline-flex;align-items:center;gap:6px;font-size:13px;border:1px solid var(--line);border-radius:999px;padding:3px 11px;background:var(--card2)}}
-.pill i{{width:7px;height:7px;border-radius:50%;background:var(--todo)}} .pill em{{font-style:normal;color:var(--mut);font-size:11px}}
-.p-stuck{{border-color:color-mix(in srgb,var(--stuck) 55%,transparent)}} .p-stuck i{{background:var(--stuck)}}
-.p-in_progress{{border-color:color-mix(in srgb,var(--prog) 55%,transparent)}} .p-in_progress i{{background:var(--prog)}}
-.p-done i{{background:var(--done)}} .p-done{{opacity:.6;text-decoration:line-through}}
-.p-not_started{{border-style:dashed}}
-/* chain */
+:root{{--bg:#0b1012;--panel:#12191b;--card:#172022;--border:#283335;--text:#edf3ef;--muted:#97a5a5;--dim:#687879;--accent:{accent};--green:#9dccb6;--amber:#e8be78;--red:#f09088;--radius:19px;--sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}}
+    *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;-webkit-font-smoothing:antialiased;background-image:radial-gradient(ellipse at 48% 15%,#1b45321a,transparent 44%),radial-gradient(#758d8710 .7px,transparent .7px);background-size:auto,22px 22px}}
+    button,summary,a{{-webkit-tap-highlight-color:transparent}}button{{font:inherit;color:inherit;cursor:pointer}}button:focus-visible,summary:focus-visible,a:focus-visible{{outline:2px solid var(--accent);outline-offset:5px}}button{{border:0}}button:disabled{{cursor:default}}button svg{{flex:none}}a{{color:var(--accent)}}svg{{display:block}}h1,h2,h3,p{{margin:0}}button::-moz-focus-inner{{border:0}}.page{{max-width:1600px;margin:0 auto;padding:31px 48px 24px}}.topline{{display:flex;align-items:center;justify-content:space-between;color:var(--dim);font-size:11px;letter-spacing:1.7px;margin-bottom:23px}}.brandline{{display:flex;align-items:center;gap:10px}}.brandline svg{{color:var(--accent)}}.brandline span:last-child{{color:var(--muted);letter-spacing:.8px}}.slash{{opacity:.4}}.demo-tag{{font-size:10px;letter-spacing:1.2px;border:1px solid #354440;border-radius:5px;padding:5px 8px;color:#b7c9c0;background:#14221e}}
+    .header{{display:flex;align-items:center;justify-content:space-between;gap:24px}}.identity{{display:flex;align-items:baseline;gap:17px}}.identity h1{{font-size:39px;line-height:1;letter-spacing:-1.8px;font-weight:650}}.identity p{{font-size:13px;color:var(--muted);letter-spacing:.5px}}.meta{{display:flex;align-items:center;gap:19px;color:var(--muted);font-size:12px}}.meta strong{{font-weight:500;color:#c9d4d0;font-variant-numeric:tabular-nums}}.divider{{height:14px;width:1px;background:var(--border)}}.blocked-count{{color:var(--red);display:flex;align-items:center;gap:7px}}.dot{{width:6px;height:6px;display:inline-block;flex-shrink:0;border-radius:50%;background:currentColor}}.route{{margin-top:27px;margin-bottom:31px}}.milestones{{height:175px;position:relative;display:grid;grid-template-columns:repeat(5,1fr)}}.rail{{position:absolute;left:10%;right:10%;height:4px;top:68px;background:repeating-linear-gradient(to right,#3f4c4d 0,#3f4c4d 3px,transparent 3px,transparent 13px);border-radius:5px}}.rail:before{{content:"";position:absolute;height:5px;left:0;width:50%;border-radius:5px;background:linear-gradient(to right,#8ab99f 0%,#92cfb3 58%,var(--accent) 100%)}}.milestone{{position:relative;background:transparent;display:flex;align-items:center;flex-direction:column;padding:45px 0 0;border-radius:10px}}.node{{position:relative;display:grid;place-items:center;width:49px;height:49px;border:2px solid #3a494b;background:var(--bg);border-radius:50%;box-shadow:0 0 0 6px var(--bg);transition:transform .2s,border-color .2s}}.node:after{{content:"";width:13px;height:13px;border-radius:50%;background:#344144}}.milestone:hover .node{{transform:scale(1.09);border-color:var(--muted)}}.milestone.done .node{{background:#93c8ae;border-color:#93c8ae;box-shadow:0 0 0 5px var(--bg),0 0 0 7px #4a7866}}.milestone.done .node:after{{display:none}}.node svg{{color:#183a2c;width:23px;height:23px}}.milestone.current .node{{background:var(--accent);border:6px solid var(--bg);box-shadow:0 0 0 3px var(--accent),0 0 0 12px #54e0c112,0 0 0 24px #54e0c106,0 0 60px 8px #54e0c121}}.milestone.current .node:after{{width:16px;height:16px;background:#15352d}}.here{{position:absolute;top:-1px;color:#0e2d26;font-size:11px;font-weight:650;background:var(--accent);padding:7px 12px;border-radius:7px;white-space:nowrap;box-shadow:0 4px 24px #54e0c11a;letter-spacing:.8px}}.here:after{{content:"";position:absolute;width:8px;height:8px;background:var(--accent);transform:rotate(45deg);left:calc(50% - 4px);bottom:-4px}}.milestone h2{{font-size:16px;font-weight:550;margin-top:17px;letter-spacing:.2px}}.milestone p{{font-size:11px;margin-top:7px;color:var(--dim)}}.milestone.done p{{color:#89b99f}}.milestone.current p{{color:var(--accent)}}.milestone.future{{color:#939f9f}}.milestone.next .node{{border-color:#617e78}}.milestone.next .node:after{{background:#67837d}}.remaining{{display:flex;justify-content:center;align-items:center;gap:11px;margin-top:7px;font-size:12px}}.remaining-label{{color:var(--muted);display:flex;align-items:center;gap:9px;margin-right:9px}}.remaining-label strong{{font-size:26px;line-height:1;color:var(--accent);font-weight:500}}.pill{{display:flex;align-items:center;gap:7px;border:1px solid #3d4747;background:#192022;border-radius:30px;padding:6px 11px;color:#a8b1af;font-size:11px;transition:background .2s,transform .2s}}.pill:hover{{transform:translateY(-2px);background:#293436}}.pill.progress{{color:var(--amber);border-color:#64533a;background:#30291e}}.pill.blocked{{color:var(--red);border-color:#62413e;background:#2c1f1e}}
+    .workspace{{display:grid;grid-template-columns:minmax(0,1fr) 324px;gap:20px;align-items:stretch}}.panel{{border:1px solid var(--border);border-radius:var(--radius);background:linear-gradient(140deg,#17202280,#12191bf2 70%)}}.parts-panel{{padding:20px;min-width:0}}.panel-heading{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}}.eyebrow{{font-size:10px;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted);font-weight:600}}.panel-title{{display:flex;align-items:center;gap:13px}}.panel-title h2{{font-size:13px;font-weight:550;letter-spacing:.5px}}.completion{{font-size:11px;color:var(--dim)}}.completion strong{{font-weight:500;color:var(--green)}}.highlight-button{{display:flex;align-items:center;gap:6px;border:1px solid #374846;border-radius:6px;background:transparent;font-size:10px;padding:6px 8px;color:#afc5bd;white-space:nowrap}}.highlight-button[aria-pressed=true]{{background:#244037;color:var(--accent);border-color:#477f6e}}.change-marker{{height:6px;width:6px;border:1px solid var(--accent);display:inline-block;border-radius:2px;transform:rotate(45deg)}}.parts{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}}.part{{position:relative;display:flex;flex-direction:column;align-items:flex-start;text-align:left;min-height:177px;padding:17px 15px;border:1px solid #34433f;background:linear-gradient(130deg,#202c29,#192223);border-radius:12px;transition:transform .18s,border-color .18s,opacity .18s,box-shadow .18s;min-width:0}}.part:hover{{transform:translateY(-3px);border-color:#93b4aa;box-shadow:0 8px 28px #0003}}.part-title{{display:flex;align-items:center;justify-content:space-between;width:100%;gap:6px}}.part h3{{font-size:14px;font-weight:550;letter-spacing:.2px}}.part .part-arrow{{font-size:15px;opacity:0;color:var(--accent);transition:opacity .18s}}.part:hover .part-arrow,.part:focus-visible .part-arrow{{opacity:1}}.part.changed{{border-color:#508573;box-shadow:inset 0 0 0 1px #54e0c10c}}.part.changed:after{{position:absolute;top:12px;right:11px;content:"";width:5px;height:5px;border-radius:2px;background:var(--accent);transform:rotate(45deg)}}.part.changed .part-arrow{{margin-right:6px}}.status{{display:inline-flex;align-items:center;gap:5px;margin-top:12px;border-radius:5px;padding:4px 7px;font-size:10px;line-height:1.2;white-space:nowrap}}.status.done{{background:#a0d6b814;color:#a4cdb7}}.status.progress{{background:#e8be7819;color:var(--amber)}}.status.blocked{{background:#ed948d1b;color:var(--red)}}.status.todo{{background:#8b999910;color:#859493}}.part-note{{color:#98aaa3;font-size:11px;line-height:1.7;margin-top:auto;padding-top:24px}}.part.progress{{background:linear-gradient(140deg,#2b2920,#1c2220)}}.part.progress .part-note{{color:#b4b4a3;padding-top:15px}}.mini-progress{{margin-top:16px;width:100%;height:4px;border-radius:3px;background:#ffffff0c;overflow:hidden}}.mini-progress span{{display:block;width:70%;height:100%;border-radius:3px;background:var(--amber)}}.part.blocked{{background:repeating-linear-gradient(135deg,#ef8c8810 0,#ef8c8810 5px,transparent 5px,transparent 13px),linear-gradient(145deg,#302322,#211d1e);border-color:#93655b}}.part.blocked .part-note{{color:#d2a5a0}}.part.todo{{background:#131b1d;border:1px dashed #344245;color:#b1bdbc}}.part.todo .part-note{{color:#728481}}.parts.highlight .part:not(.changed){{opacity:.32}}.parts-caption{{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-top:18px;font-size:10px;color:var(--dim)}}.legend{{display:flex;align-items:center;gap:7px}}.aside{{display:flex;flex-direction:column;gap:13px}}.action-panel{{padding:18px 20px}}.action-panel h2{{font-size:17px;line-height:1.45;font-weight:550;letter-spacing:.2px;margin-top:9px}}.action-panel p{{font-size:11px;line-height:1.8;color:var(--muted);margin-top:7px}}.next-panel{{border-color:#3e5d52;background:linear-gradient(135deg,#1a2a24,#151e1c);position:relative}}.next-panel .eyebrow{{color:var(--accent)}}.next-panel .eyebrow span{{float:right;font-size:12px;letter-spacing:0;opacity:.7}}.text-link{{display:inline-flex;align-items:center;gap:8px;padding:0;background:none;color:var(--accent);font-size:11px;margin-top:13px;transition:gap .15s}}.text-link:hover{{gap:13px}}.decision-panel{{background:linear-gradient(130deg,#3224228a,#201c1b);border-color:#60413b}}.decision-panel .eyebrow{{color:#dda397}}.decision-panel h2{{font-size:15px}}.decision-panel .text-link{{color:#efb3a4}}.changes-panel{{flex:1;padding:18px 20px}}.changes-panel .eyebrow{{display:flex;align-items:center;gap:8px}}.change-list{{padding:0;margin:15px 0 0;list-style:none;display:flex;flex-direction:column;gap:12px}}.change-list li{{display:flex;align-items:center;gap:8px;font-size:11px;line-height:1.5;color:#b1beb9}}.change-list time{{margin-left:auto;color:var(--dim);font-variant-numeric:tabular-nums;font-size:10px}}.change-list button{{background:none;padding:0;text-align:left;color:inherit;font-size:inherit}}.change-list button:hover{{color:var(--text)}}.change-list strong{{font-weight:500;color:#d7e2dc}}.change-list .done{{color:var(--green)}}.change-list .blocked{{color:var(--red)}}.change-list .progress{{color:var(--amber)}}
+    .footer{{margin-top:21px;border-top:1px solid #253133;padding-top:15px;display:flex;align-items:flex-start;justify-content:space-between;gap:25px;color:var(--dim);font-size:10px}}.sources{{flex:1;min-width:0}}.sources summary{{cursor:pointer;list-style:none;display:inline-flex;align-items:center;gap:8px;color:#94a7a1}}.sources summary::-webkit-details-marker{{display:none}}.sources summary:before{{content:"+";font-size:15px;line-height:10px;color:var(--accent);font-weight:300}}.sources[open] summary:before{{content:"−"}}.source-content{{border:1px solid var(--border);border-radius:10px;background:#131c1d;padding:17px;margin-top:14px;max-width:860px;display:grid;grid-template-columns:1fr 1fr;gap:24px}}.source-content h3{{color:#c3d0ca;font-size:12px;font-weight:500;margin-bottom:8px}}.source-content p{{font-size:11px;line-height:1.9;color:var(--muted)}}.signature{{white-space:nowrap;letter-spacing:.2px}}.signature span{{color:#91b6a8}}.footer .demo-note{{margin-top:10px;font-size:10px;color:#758b83}}
+    dialog{{padding:0;border:1px solid #41554d;border-radius:20px;background:#141e1e;color:var(--text);width:min(560px,calc(100% - 32px));max-height:85dvh;box-shadow:0 32px 120px #0009;overflow:auto}}dialog::backdrop{{background:#040a0cc7;backdrop-filter:blur(8px)}}.dialog-content{{padding:29px}}.dialog-topline{{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}}.dialog-topline .eyebrow{{color:var(--accent)}}.close{{display:grid;place-items:center;border-radius:50%;width:30px;height:30px;background:#25332f;color:#c5d8cc;font-size:20px;font-weight:300}}.close:hover{{background:#354940}}.dialog-content h2{{font-size:25px;letter-spacing:-.3px;line-height:1.4;font-weight:550}}.dialog-intro{{font-size:13px;line-height:1.9;color:#a9bbb2;margin-top:13px}}.dialog-section{{border-top:1px solid #2b3934;margin-top:22px;padding-top:19px}}.dialog-section h3{{font-size:12px;color:#d4e0d9;font-weight:500;margin-bottom:12px}}.task-list{{padding:0;list-style:none;margin:0;display:grid;gap:12px}}.task-list li{{display:flex;align-items:flex-start;gap:9px;font-size:12px;line-height:1.7;color:#a8bbb1}}.task-list .check{{color:var(--accent);width:15px;flex-shrink:0}}.task-list .pending{{color:var(--amber)}}.evidence{{display:block;font-size:11px;line-height:1.7;padding:11px 12px;border-radius:7px;border:1px solid #2c3f35;background:#102019;color:#99b5a5;overflow-wrap:anywhere}}.dialog-note{{font-size:10px;line-height:1.8;color:var(--dim);margin-top:20px}}.option{{border:1px solid #3d5748;background:#1d2a21;padding:14px;border-radius:10px;margin-top:10px}}.option.secondary{{background:#1a2121;border-color:#344440}}.option h3{{font-size:13px;margin:0 0 5px}}.option p{{font-size:12px;line-height:1.8;color:var(--muted)}}.option small{{display:inline-block;font-size:9px;color:var(--accent);border:1px solid #48654f;border-radius:4px;padding:1px 5px;margin-left:7px;vertical-align:1px}}
+    .page{{padding-top:27px;padding-bottom:20px}}.topline{{margin-bottom:18px}}.route{{margin-top:24px;margin-bottom:27px}}.milestones{{height:165px}}.part{{min-height:170px}}.part h3{{font-size:16px}}.part-note{{font-size:12px}}.status{{font-size:11px}}.milestone h2{{font-size:18px}}.milestone p{{font-size:12px}}.action-panel p,.change-list li{{font-size:12px}}.parts-caption,.completion{{font-size:11px}}.panel-title h2{{font-size:14px}}.eyebrow{{font-size:11px}}.text-link{{font-size:12px}}.part .part-arrow{{position:absolute;right:14px;top:15px}}.part.changed .part-arrow{{display:none}}
+    @media(min-width:1550px){{.page{{padding-top:40px}}.route{{margin-top:39px;margin-bottom:41px}}.part{{min-height:198px;padding:21px 18px}}.part h3{{font-size:16px}}.part-note{{font-size:12px}}.workspace{{grid-template-columns:minmax(0,1fr) 350px;gap:24px}}.action-panel{{padding:21px 23px}}.changes-panel{{padding:21px 23px}}.milestones{{height:195px}}.milestone h2{{font-size:18px}}.milestone p{{font-size:12px}}.remaining{{font-size:13px}}}}
+    @media(max-width:1199px){{.page{{padding:27px 30px 22px}}.workspace{{grid-template-columns:minmax(0,1fr) 290px;gap:16px}}.parts{{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.part{{min-height:147px}}.part-note{{padding-top:17px}}.parts-panel{{padding:18px}}.aside{{gap:16px}}.action-panel,.changes-panel{{padding:20px}}.changes-panel{{flex:0}}.meta{{gap:12px}}.identity{{gap:12px}}.identity p{{font-size:12px}}.part h3{{font-size:15px}}}}
+    @media(max-width:760px){{.page{{padding:23px 20px}}.topline{{margin-bottom:26px;font-size:10px}}.brandline{{gap:7px}}.header{{align-items:flex-start;flex-direction:column;gap:16px}}.identity h1{{font-size:37px}}.identity p{{font-size:12px}}.meta{{gap:14px;font-size:11px}}.route{{margin-top:30px;margin-bottom:26px}}.milestones{{height:162px}}.milestone{{padding-top:44px}}.rail{{top:60px;height:3px;background-size:auto}}.rail:before{{height:3px}}.node{{width:33px;height:33px;border-width:1.5px;box-shadow:0 0 0 4px var(--bg)}}.node:after{{width:9px;height:9px}}.node svg{{width:18px;height:18px}}.milestone.done .node{{box-shadow:0 0 0 3px var(--bg),0 0 0 4px #4a7866}}.milestone.current .node{{border-width:4px;box-shadow:0 0 0 2px var(--accent),0 0 0 8px #54e0c110,0 0 0 16px #54e0c106}}.milestone.current .node:after{{width:11px;height:11px}}.here{{font-size:10px;padding:6px 9px;top:0;letter-spacing:0}}.milestone h2{{font-size:11px;margin-top:18px;letter-spacing:0}}.milestone p{{font-size:9px;margin-top:7px;line-height:1.5}}.remaining{{flex-wrap:wrap;gap:8px;justify-content:flex-start;margin-top:0}}.remaining-label{{width:100%;font-size:11px;gap:6px;margin:0 0 4px}}.remaining-label strong{{font-size:21px}}.pill{{font-size:10px;padding:6px 10px}}.workspace{{display:flex;flex-direction:column;gap:16px}}.aside{{display:contents}}.next-panel{{order:-1}}.decision-panel{{order:1}}.changes-panel{{order:2}}.parts-panel{{padding:17px 14px}}.part{{min-height:157px;padding:17px 13px}}.panel-heading{{gap:6px;margin-bottom:16px}}.panel-title{{gap:9px}}.panel-title h2{{font-size:12px}}.completion{{font-size:10px}}.highlight-button{{font-size:9px;gap:5px;padding:5px 6px}}.parts-caption{{font-size:9px;gap:8px}}.action-panel,.changes-panel{{padding:18px}}.next-panel h2{{font-size:18px}}.next-panel p{{max-width:290px}}.next-panel .text-link{{margin-top:10px}}.change-list{{gap:14px}}.change-list li{{font-size:12px}}.decision-panel h2{{font-size:17px}}.footer{{margin-top:21px;flex-direction:column;gap:18px}}.source-content{{grid-template-columns:1fr;gap:17px}}.signature{{font-size:9px}}.dialog-content{{padding:23px}}.dialog-content h2{{font-size:23px}}}}
+    @media(max-width:760px){{.part .part-arrow{{display:none}}}}
+    @media(prefers-reduced-motion:reduce){{*,*::before,*::after{{transition:none!important;scroll-behavior:auto!important}}}}
+/* Data-backed details and interactions. */
+
 .chain{{display:flex;align-items:stretch;overflow-x:auto;padding:14px 2px 6px}}
-.node{{position:relative;flex:1 0 132px;max-width:220px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}}
-.node b{{display:block;font-size:14px}} .node span{{display:block;font-size:12.5px;color:var(--mut);margin-top:2px}}
+.chain-node{{position:relative;flex:1 0 132px;max-width:220px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}}
+.chain-node b{{display:block;font-size:14px}} .chain-node span{{display:block;font-size:12.5px;color:var(--mut);margin-top:2px}}
 .n-done{{border-color:color-mix(in srgb,var(--done) 50%,var(--line))}} .n-stuck{{border-color:var(--stuck);background:color-mix(in srgb,var(--stuck) 9%,var(--card2))}}
 .n-in_progress{{border-color:color-mix(in srgb,var(--prog) 55%,var(--line))}} .n-not_started{{border-style:dashed}}
 .is-bn{{border:2px solid var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 14%,transparent)}}
-.node .bn{{position:absolute;top:-10px;left:10px;background:var(--accent);color:#06221e;font-size:11px;font-weight:700;padding:1px 7px;border-radius:5px;margin:0}}
+.chain-node .bn{{position:absolute;top:-10px;left:10px;background:var(--accent);color:#06221e;font-size:11px;font-weight:700;padding:1px 7px;border-radius:5px;margin:0}}
 .arrow{{flex:0 0 30px;display:flex;align-items:center;position:relative}}
 .arrow span{{flex:1;height:2px;background:var(--mut)}} .arrow::after{{content:"";position:absolute;right:2px;border:5px solid transparent;border-left:7px solid var(--mut)}}
 .a-inferred span{{background:repeating-linear-gradient(90deg,var(--mut) 0 4px,transparent 4px 8px)}}
 .a-none span{{background:none}} .a-none::after{{display:none}}
-.legend{{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;color:var(--mut);margin-top:10px}}
-.legend i{{display:inline-block;width:22px;height:2px;vertical-align:middle;margin-right:6px;background:var(--mut)}}
-.legend .lg-i{{background:repeating-linear-gradient(90deg,var(--mut) 0 4px,transparent 4px 8px)}}
-.legend .lg-b{{width:12px;height:12px;border:2px solid var(--accent);background:none;border-radius:3px}}
+.chain-card .legend{{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;color:var(--mut);margin-top:10px}}
+.chain-card .legend i{{display:inline-block;width:22px;height:2px;vertical-align:middle;margin-right:6px;background:var(--mut)}}
+.chain-card .legend .lg-i{{background:repeating-linear-gradient(90deg,var(--mut) 0 4px,transparent 4px 8px)}}
+.chain-card .legend .lg-b{{width:12px;height:12px;border:2px solid var(--accent);background:none;border-radius:3px}}
 .why{{margin-top:8px;font-size:13px;color:var(--mut)}} .why summary{{cursor:pointer}} .why ul{{margin:8px 0 0;padding-left:18px}}
 .why li{{margin:4px 0}} .why b{{color:var(--fg);font-weight:600}} .w-inferred b::before{{content:"⋯ "}}
-/* grid */
-.grid{{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}}
-.sh{{display:flex;justify-content:space-between;align-items:baseline}} .sh span{{color:var(--mut);font-size:13px}} .sh b{{color:var(--done)}}
-.parts{{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}}
-.part{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;min-height:150px}}
-.part h3{{font-size:16px}} .part p{{margin:0;color:var(--mut);font-size:13px}}
-.part footer{{margin-top:auto;padding-top:8px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);word-break:break-word}}
-.pt-stuck{{border-color:color-mix(in srgb,var(--stuck) 60%,var(--line));background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--stuck) 7%,var(--card)) 0 10px,var(--card) 10px 20px)}}
-.pt-not_started{{border-style:dashed;background:transparent}}
-.pt-done h3{{color:var(--mut)}}
-.changed{{outline:2px solid var(--accent);outline-offset:2px}}
-.ph{{display:flex;flex-wrap:wrap;gap:6px;align-items:center}}
-.badge{{font-size:12px;font-weight:600;padding:1px 8px;border-radius:6px;background:var(--card2);color:var(--mut)}}
-.s-done{{color:var(--done);background:color-mix(in srgb,var(--done) 14%,transparent)}}
-.s-in_progress{{color:var(--prog);background:color-mix(in srgb,var(--prog) 15%,transparent)}}
-.s-stuck{{color:var(--stuck);background:color-mix(in srgb,var(--stuck) 15%,transparent)}}
-.chg{{font-size:11.5px;color:var(--accent);font-weight:600}}
-.wait{{color:var(--stuck)!important}}
-.prog .pl{{display:flex;justify-content:space-between;font-size:12px;color:var(--mut)}}
-.bar{{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;margin-top:3px}} .bar i{{display:block;height:100%;background:var(--prog);border-radius:3px}}
-.pt-done .bar i{{background:var(--done)}}
-aside .card{{padding:16px 18px}}
-.hero{{margin:-6px 0 18px}} .hl-text{{font-size:19px;line-height:1.45;margin:0 0 10px;font-weight:550;max-width:70ch}}
-.hl-row{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px}}
-.hl{{border:1px solid var(--line);border-radius:999px;padding:2px 10px;background:var(--card)}} .hl b{{font-size:14px}}
-.hl-better b{{color:var(--done)}} .hl-worse b{{color:var(--stuck)}} .hl-you{{border-color:color-mix(in srgb,var(--stuck) 45%,var(--line))}}
-.hl-you b{{color:var(--stuck)}} .hl-bn{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .hl-since{{color:var(--dim)}}
-.owner{{float:right;text-transform:none;letter-spacing:0;font-size:12px;padding:1px 8px;border-radius:6px;background:var(--card2)}}
-.o-user{{color:var(--stuck)}} .o-agent{{color:var(--accent)}}
-.decide li.answered{{opacity:.75}} .decide li.answered .def{{color:var(--done)}}
-.open-left{{font-size:13px}} .open-left span{{color:var(--prog);font-weight:600;margin-right:4px}}
-.next .how,.next .unl{{margin:8px 0 0;font-size:13px}} .next .how span,.next .unl span{{color:var(--dim);margin-right:6px}}
-.next{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}} .next .nt{{font-size:18px;font-weight:650;margin:0 0 6px;color:var(--accent)}}
-.next p{{margin:0;color:var(--mut);font-size:13px}}
-.decide{{border-color:color-mix(in srgb,var(--stuck) 35%,var(--line))}} .decide h2{{color:var(--stuck)}}
-.decide ul,.changes ul{{list-style:none;margin:0;padding:0}} .decide li{{padding:8px 0;border-top:1px solid var(--line)}} .decide li:first-child{{border:0;padding-top:0}}
-.decide .q{{margin:0;font-weight:600}} .decide .d{{margin:3px 0 0;font-size:13px;color:var(--mut)}} .decide .d b{{color:var(--accent);font-weight:500}}
-.changes li{{display:flex;gap:8px;align-items:baseline;font-size:13px;padding:3px 0}} .changes li>i{{flex:0 0 8px;height:8px;border-radius:50%;background:var(--accent);transform:translateY(-1px)}}
-.dot-done{{background:var(--done)!important}} .dot-stuck{{background:var(--stuck)!important}} .dot-in_progress{{background:var(--prog)!important}} .dot-not_started{{background:var(--todo)!important}}
-.changes h3{{font-size:12px;color:var(--mut);font-weight:600;margin:12px 0 4px}} .since{{float:right;text-transform:none;letter-spacing:0;color:var(--dim)}}
-.commits li{{display:block;color:var(--mut)}} .commits .t{{color:var(--dim);font-size:12px}}
-.muted{{color:var(--dim)}} .plain{{margin:0;padding-left:18px;color:var(--mut);font-size:13px}} .plain li{{margin:4px 0}}
-.details{{margin-top:8px}} .details details{{background:var(--card);border:1px solid var(--line);border-radius:10px;margin-bottom:8px}}
-.details summary{{cursor:pointer;padding:12px 16px;display:flex;justify-content:space-between;gap:12px}} .details summary span{{color:var(--dim);font-size:12px}}
-.details details>*:not(summary){{margin:0 16px 14px}}
-.tw{{overflow-x:auto}} table{{border-collapse:collapse;width:100%;font-size:13px}} th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}}
-th{{color:var(--mut);font-weight:600}}
-.foot{{margin-top:20px;font-size:12px;color:var(--dim)}} .foot p{{margin:4px 0}}
-.pin{{position:fixed;z-index:30;top:10px;left:50%;transform:translateX(-50%);max-width:min(920px,calc(100% - 24px));
-display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;background:var(--card);border:1px solid var(--accent);
-border-radius:999px;padding:6px 14px;font-size:13px;box-shadow:0 8px 28px color-mix(in srgb,#000 35%,transparent)}}
-.pin[hidden]{{display:none}} .pin b{{color:var(--accent)}}
-.pin > * + *::before{{content:"·";color:var(--dim);margin-right:10px}}
-.scrub{{display:flex;align-items:center;gap:8px;margin:-8px 0 16px;color:var(--mut);font-size:12px}}
-.scrub input{{flex:1}} #scrubcap{{color:var(--accent)}}
-.filters{{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}}
-.filters button,.act,.done-name,.ev{{font:inherit;cursor:pointer}}
-.filters button{{background:var(--card);color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:3px 10px}}
-.filters button[aria-pressed=true]{{color:var(--fg);border-color:var(--accent)}}
-.filters b{{font-weight:600}}
-.unmap{{margin:0 0 12px}} .unmap .plain{{display:flex;flex-wrap:wrap;gap:6px 12px;list-style:none;padding:8px 0 0}}
-.eyebrow{{margin:0;font-size:12px;color:var(--dim);letter-spacing:.04em;text-transform:uppercase}}
-.done-row{{margin-top:12px;border:1px dashed var(--line);border-radius:12px;padding:0 12px 8px}}
-.done-row summary{{cursor:pointer;padding:10px 4px;color:var(--mut)}}
-.done-names{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}}
-.done-name{{background:transparent;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:2px 10px}}
-.ev{{background:transparent;color:var(--dim);border:0;border-bottom:1px dotted var(--dim);padding:0}}
-.part footer{{display:flex;flex-wrap:wrap;gap:6px 10px}}
-.acts{{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px}}
-.act{{background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:3px 10px}}
-.act.accept{{border-color:color-mix(in srgb,var(--accent) 55%,var(--line));color:var(--accent)}}
-.copied,.taken,.hint{{display:none}} .hint{{color:var(--dim);font-size:12px;margin:6px 0 0}}
-.decide li.copied-on .copied,.decide li .hint{{display:inline}}
-.decide li.expired .q{{text-decoration:line-through;color:var(--dim)}}
-.decide li.expired .taken{{display:block;color:var(--accent);margin:4px 0 0;font-size:13px}}
-.override-form{{display:flex;gap:6px;margin-top:8px}} .override-form[hidden]{{display:none}}
-.override-form input{{flex:1;background:var(--card2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:4px 8px}}
-.chain-alt{{display:none;margin-top:8px}} .fork-label{{display:none;margin:8px 0 0;color:var(--mut);font-size:13px}}
-body[data-fork] .chain-alt,body[data-fork] .fork-label{{display:flex}}
-body[data-fork] .fork-label{{display:block}}
-body[data-fork] .chain-default .fork-only{{opacity:.38}}
-.chain-alt .fork-shared{{opacity:.55}}
-body[data-focus] .linkable{{opacity:.38}}
-body[data-focus] .linkable.on{{opacity:1;outline:2px solid var(--accent);outline-offset:2px}}
-body[data-filter=stuck] .part:not([data-status=stuck]),
-body[data-filter=in_progress] .part:not([data-status=in_progress]),
-body[data-filter=changed] .part:not(.changed),
-body[data-filter=inferred] .part:not([data-inferred]){{display:none}}
-body[data-filter=stuck] .pill:not(.p-stuck),
-body[data-filter=in_progress] .pill:not(.p-in_progress){{display:none}}
-.part[data-hist=stuck]{{border-color:var(--stuck)}}
-.part[data-hist=done]{{border-color:color-mix(in srgb,var(--done) 50%,var(--line))}}
-.part[data-hist=in_progress]{{border-color:color-mix(in srgb,var(--prog) 55%,var(--line))}}
-#peek{{position:fixed;z-index:40;max-width:280px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;box-shadow:0 10px 30px color-mix(in srgb,#000 40%,transparent)}}
-#peek[hidden]{{display:none}} #peek a{{color:var(--accent);display:inline-block;margin-top:6px}}
-.why-pop{{display:none;position:absolute;z-index:4;top:18px;left:0;width:200px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--mut)}}
-.arrow.open .why-pop{{display:block}}
-@keyframes yah-pulse{{0%,100%{{box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 14%,transparent)}}50%{{box-shadow:0 0 0 8px color-mix(in srgb,var(--accent) 28%,transparent)}}}}
-.is-bn{{animation:yah-pulse 2.4s ease-in-out infinite}}
-@media (prefers-reduced-motion:reduce){{.is-bn{{animation:none}} .part,.ms{{transition:none}}}}
-@media (max-width:900px){{.grid{{grid-template-columns:1fr}}}}
-@media (max-width:640px){{h1{{font-size:23px}} .card{{padding:14px}}
- .chain{{flex-direction:column;overflow:visible}} .node{{max-width:none;flex:none}}
- .arrow{{flex:0 0 26px;justify-content:center}} .arrow span{{flex:0 0 2px;height:100%;width:2px}}
- .a-inferred span{{background:repeating-linear-gradient(180deg,var(--mut) 0 4px,transparent 4px 8px)}}
- .arrow::after{{right:auto;bottom:0;border:5px solid transparent;border-top:7px solid var(--mut)}}
- .why-pop{{position:static;width:auto}}
- .ms{{flex-basis:112px}}
- .pin{{left:12px;right:12px;transform:none;max-width:none;flex-wrap:nowrap;overflow-x:auto;white-space:nowrap;
-   border-radius:12px;scrollbar-width:none}}}}
+
+:root{{--line:var(--border);--fg:var(--text);--mut:var(--muted);--done:var(--green);--prog:var(--amber);--stuck:var(--red);--todo:var(--dim);--card2:var(--card)}}
+.brand-dot{{color:var(--accent)}}.demo-tag{{text-decoration:none;letter-spacing:.5px}}.identity{{min-width:0}}.identity h1{{flex-shrink:0}}.identity p{{max-width:44ch;line-height:1.65}}.meta{{flex-shrink:0}}.meta>span{{white-space:nowrap}}.milestones{{grid-template-columns:repeat(var(--stages),minmax(0,1fr));list-style:none;margin:0;padding:0}}.milestone{{text-align:center;cursor:pointer}}.milestone .node svg{{display:none}}.milestone.done .node svg{{display:block}}.milestone:not(.current):not(.reached) .here{{display:none}}.milestone.reached .node{{box-shadow:0 0 0 5px var(--bg),0 0 0 7px var(--accent),0 0 0 15px color-mix(in srgb,var(--accent) 8%,transparent),0 0 42px 6px color-mix(in srgb,var(--accent) 10%,transparent)}}.milestone.reached+.milestone.future .node,.milestone.current+.milestone.future .node{{border-color:#617e78}}.rail:before{{width:var(--completed)}}.goal-unknown{{min-height:30px}}.goal-unknown .remaining-label{{margin:0}}.main{{min-width:0}}.main>.parts-panel{{height:100%}}.parts{{grid-template-columns:repeat(var(--columns,4),minmax(0,1fr))}}.part{{cursor:pointer}}.part-note{{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}.part .status{{max-width:100%;white-space:normal}}.part .tag{{margin-top:5px}}.part .part-arrow{{font-size:15px;opacity:0;color:var(--accent)}}.owner{{float:right;font-size:12px;letter-spacing:0}}.next details{{margin-top:13px}}.next summary{{list-style:none;font-size:12px;color:var(--accent);cursor:pointer}}.next summary:after{{content:' →';margin-left:6px}}.next .how,.next .unl{{font-size:12px;overflow-wrap:anywhere}}.next .how span,.next .unl span{{color:var(--dim)}}.current-panel h2{{font-size:15px;line-height:1.7}}.current-panel .eyebrow{{color:#c0cfc8}}.current-panel p{{color:var(--dim)}}.changes-panel .since{{display:block;font-size:10px;color:var(--dim);margin-top:16px}}.change-list .muted{{color:var(--dim)}}.change-list li>i{{flex:none;width:6px;height:6px;border-radius:50%;background:var(--accent)}}.dot-done{{background:var(--green)!important}}.dot-stuck{{background:var(--red)!important}}.dot-in_progress{{background:var(--amber)!important}}.dot-not_started{{background:var(--dim)!important}}.change-list li{{align-items:baseline}}.change-list li>i{{transform:translateY(-1px)}}
+.tag{{font-size:10px;color:var(--muted);border:1px dashed var(--dim);border-radius:4px;padding:1px 5px}}.sources{{min-width:0}}.source-content{{display:block;max-width:none;padding:18px}}.source-content .details{{margin-top:10px}}.source-content h2{{font-size:11px;letter-spacing:1px;color:var(--muted);margin:12px 0}}.source-content details{{border-top:1px solid var(--border);padding:12px 0}}.source-content details:first-child{{border-top:0}}.source-content details>summary{{font-size:12px;display:flex;justify-content:space-between;gap:16px;line-height:1.7;color:var(--text)}}.source-content details>summary span{{color:var(--dim);font-size:11px}}.source-content summary:before{{display:none}}.source-content details>p,.source-content details>ul,.source-content details>.tw{{margin-top:12px}}.foot{{margin-top:15px;padding-top:12px;border-top:1px solid var(--border);overflow-wrap:anywhere}}.plain,.commits{{padding-left:18px;font-size:12px;line-height:1.9;color:var(--muted)}}.commits .t{{color:var(--dim)}}.tw{{overflow-x:auto}}table{{width:100%;border-collapse:collapse;font-size:12px;color:var(--muted)}}th,td{{text-align:left;padding:8px;border-bottom:1px solid var(--border);vertical-align:top}}th{{color:var(--text);font-weight:500}}.source-content code,#part-detail code{{font:11px ui-monospace,SFMono-Regular,monospace;background:var(--card);border-radius:4px;padding:2px 4px;overflow-wrap:anywhere}}.unmap ul{{list-style:none;padding:0}}.source-content a,#part-detail a{{color:var(--accent);text-decoration:none}}
+#part-detail h3{{font-size:25px;font-weight:550;line-height:1.4;margin:0 0 12px}}#part-detail p{{font-size:13px;line-height:1.9;color:var(--muted);margin:14px 0}}#part-detail .ph{{display:flex;align-items:center;flex-wrap:wrap;gap:8px}}#part-detail .status{{margin-top:0}}#part-detail footer{{display:flex;flex-wrap:wrap;gap:10px 12px;border-top:1px solid var(--border);margin-top:24px;padding-top:18px}}#part-detail .wait{{color:var(--red)}}.prog{{margin-top:18px}}.prog .pl{{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);gap:12px}}.bar{{height:4px;margin-top:8px;background:var(--border);border-radius:4px;overflow:hidden}}.bar i{{display:block;height:100%;background:var(--amber)}}.ev{{border:0;border-bottom:1px dotted var(--dim);background:none;padding:0;font-size:11px;color:var(--muted)}}.chg{{font-size:11px;color:var(--accent)}}#peek{{position:fixed;z-index:40;max-width:280px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:13px;box-shadow:0 10px 30px #0006;font-size:12px;line-height:1.8}}#peek a{{display:inline-block;margin-top:6px;color:var(--accent)}}#peek[hidden],.replay-context[hidden]{{display:none}}.replay-context{{border:1px solid var(--accent);border-radius:var(--radius);padding:20px;margin-bottom:20px}}.replay-context h2{{font-size:16px;margin-bottom:12px}}.replay-context p{{font-size:13px;line-height:1.8;color:var(--muted);overflow-wrap:anywhere}}.scrub{{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted);margin-top:15px}}.scrub input{{flex:1;min-width:0;accent-color:var(--accent)}}#scrubcap{{color:var(--accent)}}body[data-scrub="1"] .next,body[data-scrub="1"] .current-panel,body[data-scrub="1"] .chain-card,body[data-scrub="1"] .decide,body[data-scrub="1"] .pin,body[data-scrub="1"] .remaining{{display:none}}
+.pin{{position:fixed;z-index:30;top:10px;left:50%;transform:translateX(-50%);max-width:min(920px,calc(100% - 24px));display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--accent);border-radius:999px;padding:8px 15px;font-size:12px;box-shadow:0 8px 28px #0005}}.pin[hidden]{{display:none}}.pin b{{color:var(--accent)}}.pin>*+*:before{{content:'·';color:var(--dim);margin-right:10px}}body[data-filter=changed] .part:not(.changed),body[data-focus] .linkable{{opacity:.32}}body[data-focus] .linkable.on{{opacity:1;outline:2px solid var(--accent);outline-offset:2px}}
+.decide ul{{list-style:none;padding:0;margin:0}}.decide li{{margin-top:13px}}.decide .q{{font-size:15px;line-height:1.5;font-weight:550;color:var(--text)}}.decide .d{{font-size:12px;color:var(--muted)}}.decide .def{{font-weight:500;color:var(--red)}}.acts{{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}}.act,.override-form button{{font-size:11px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--card);color:var(--text)}}.act.accept{{color:var(--accent)}}.copied,.taken{{display:none}}.decide .hint{{font-size:10px;color:var(--dim);margin-top:8px}}.decide li.copied-on .copied{{display:inline}}.decide li.expired .q{{text-decoration:line-through;color:var(--dim)}}.decide li.expired .taken{{display:block;color:var(--accent)}}.override-form{{display:flex;gap:6px;margin-top:8px}}.override-form[hidden]{{display:none}}.override-form input{{min-width:0;flex:1;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:6px}}
+.chain-card{{padding:14px 0}}.chain-alt,.fork-label{{display:none}}body[data-fork] .chain-alt,body[data-fork] .fork-label{{display:flex}}body[data-fork] .chain-default .fork-only{{opacity:.38}}.chain-alt .fork-shared{{opacity:.55}}.why-pop{{display:none;position:absolute;z-index:4;top:18px;left:0;width:200px;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px;font-size:12px;color:var(--muted)}}.arrow.open .why-pop{{display:block}}
+@media(max-width:1199px){{.parts{{grid-template-columns:repeat(2,minmax(0,1fr))}}.identity{{flex-wrap:wrap;gap:7px 17px}}.identity p{{font-size:12px}}.meta{{gap:12px}}.meta>span{{white-space:normal}}}}
+@media(max-width:760px){{.main{{width:100%}}.identity{{flex-wrap:wrap}}.identity p{{max-width:none}}.meta{{flex-wrap:wrap;gap:9px}}.meta>span{{white-space:nowrap}}.milestone h2{{max-width:100%;line-height:1.6}}.remaining.goal-unknown{{justify-content:center}}.goal-unknown .remaining-label{{width:auto}}.current-panel{{order:1}}.source-content details>summary{{flex-wrap:wrap;gap:4px}}.footer .sources{{width:100%}}.sources>summary{{font-size:11px}}.topline .demo-tag{{font-size:9px;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.chain{{flex-direction:column;overflow:visible}}.chain-node{{max-width:none;flex:none}}.chain .arrow{{flex:0 0 26px;justify-content:center}}.chain .arrow span{{flex:0 0 2px;height:100%;width:2px}}.chain .arrow:after{{right:auto;bottom:0;border:5px solid transparent;border-top:7px solid var(--muted)}}.why-pop{{position:static;width:auto}}.pin{{left:12px;right:12px;transform:none;max-width:none;border-radius:12px}}}}
+:root[data-theme=light]{{--bg:#f5f8f6;--panel:#ffffff;--card:#edf3ef;--border:#d4dfd8;--text:#192b23;--muted:#586e62;--dim:#738779;--green:#387c59;--amber:#93691d;--red:#b85a4e}}
+:root[data-theme=light] .panel{{background:#fff}}:root[data-theme=light] .part{{background:linear-gradient(130deg,#edf4ef,#f5f8f6);border-color:#ceded2}}:root[data-theme=light] .part.todo{{background:#f6f8f7;border-color:#ceded2;color:#536b5e}}:root[data-theme=light] .part.blocked{{background:repeating-linear-gradient(135deg,#ef8c8810 0,#ef8c8810 5px,transparent 5px,transparent 13px),#fff4ef}}:root[data-theme=light] .part.progress{{background:#fff9eb}}:root[data-theme=light] .part-note,:root[data-theme=light] .part.todo .part-note,:root[data-theme=light] .part.progress .part-note{{color:#607569}}:root[data-theme=light] .next-panel{{background:#eaf6f0}}:root[data-theme=light] .decision-panel{{background:#fff3ee}}:root[data-theme=light] .status.done{{color:#387c59;background:#387c5912}}:root[data-theme=light] .status.todo{{color:#687f70}}:root[data-theme=light] .change-list li,:root[data-theme=light] .change-list strong{{color:#536b5e}}:root[data-theme=light] .source-content,:root[data-theme=light] dialog{{background:#fff}}:root[data-theme=light] .identity p,:root[data-theme=light] .meta,:root[data-theme=light] .meta strong{{color:#536b5e}}:root[data-theme=light] .demo-tag{{background:#eaf2ed;color:#536b5e;border-color:#ccdcd1}}:root[data-theme=light] .highlight-button{{color:#487a61;border-color:#aac9b7}}:root[data-theme=light] .pill{{background:#edf3ef;color:#536b5e}}:root[data-theme=light] .sources summary{{color:#536b5e}}:root[data-theme=light] .current-panel .eyebrow{{color:#536b5e}}
+@media(prefers-color-scheme:light){{:root[data-theme=auto]{{--bg:#f5f8f6;--panel:#ffffff;--card:#edf3ef;--border:#d4dfd8;--text:#192b23;--muted:#586e62;--dim:#738779;--green:#387c59;--amber:#93691d;--red:#b85a4e}}
+:root[data-theme=auto] .panel{{background:#fff}}:root[data-theme=auto] .part{{background:linear-gradient(130deg,#edf4ef,#f5f8f6);border-color:#ceded2}}:root[data-theme=auto] .part.todo{{background:#f6f8f7;border-color:#ceded2;color:#536b5e}}:root[data-theme=auto] .part.blocked{{background:repeating-linear-gradient(135deg,#ef8c8810 0,#ef8c8810 5px,transparent 5px,transparent 13px),#fff4ef}}:root[data-theme=auto] .part.progress{{background:#fff9eb}}:root[data-theme=auto] .part-note,:root[data-theme=auto] .part.todo .part-note,:root[data-theme=auto] .part.progress .part-note{{color:#607569}}:root[data-theme=auto] .next-panel{{background:#eaf6f0}}:root[data-theme=auto] .decision-panel{{background:#fff3ee}}:root[data-theme=auto] .status.done{{color:#387c59;background:#387c5912}}:root[data-theme=auto] .status.todo{{color:#687f70}}:root[data-theme=auto] .change-list li,:root[data-theme=auto] .change-list strong{{color:#536b5e}}:root[data-theme=auto] .source-content,:root[data-theme=auto] dialog{{background:#fff}}:root[data-theme=auto] .identity p,:root[data-theme=auto] .meta,:root[data-theme=auto] .meta strong{{color:#536b5e}}:root[data-theme=auto] .demo-tag{{background:#eaf2ed;color:#536b5e;border-color:#ccdcd1}}:root[data-theme=auto] .highlight-button{{color:#487a61;border-color:#aac9b7}}:root[data-theme=auto] .pill{{background:#edf3ef;color:#536b5e}}:root[data-theme=auto] .sources summary{{color:#536b5e}}:root[data-theme=auto] .current-panel .eyebrow{{color:#536b5e}}
+}}
+
+.session-usage{{margin-top:20px;border:1px solid var(--border);border-radius:12px;background:var(--card)}}.session-usage>summary{{display:flex;align-items:center;gap:20px;padding:15px 20px;cursor:pointer;list-style:none;font-size:12px}}.session-usage>summary::-webkit-details-marker{{display:none}}.session-usage>summary>b{{font-weight:500}}.usage-preview{{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:11px}}.usage-preview strong{{color:var(--accent);font-size:13px;font-weight:500;font-variant-numeric:tabular-nums}}.usage-divider{{margin:0 5px;color:var(--dim)}}.usage-toggle{{margin-left:auto;color:var(--muted);font-size:10px;white-space:nowrap}}.usage-content{{padding:0 20px 18px}}.usage-content td{{overflow-wrap:anywhere}}.usage-content p,.usage-content ul{{font-size:11px;line-height:1.8;color:var(--muted);margin-top:14px;overflow-wrap:anywhere}}.usage-content ul{{padding-left:18px}}.usage-content .usage-source{{font-size:10px;color:var(--dim)}}
+@media(max-width:760px){{.session-usage>summary{{flex-wrap:wrap;gap:12px;padding:15px}}.usage-preview{{order:1;flex-basis:100%;gap:5px;font-size:10px}}.usage-preview strong{{font-size:12px}}.usage-divider{{margin:0 2px}}.usage-content{{padding:0 14px 14px}}.usage-content th,.usage-content td{{font-size:11px;padding:7px 5px}}}}
+
+.workspace .main>.parts-panel{{height:auto}}
+.workspace{{align-items:start}}
+.identity h1{{min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}}
+.remaining{{flex-wrap:wrap}}
+.remaining-label{{flex-shrink:0}}
+.chain-card{{padding:24px;margin-bottom:20px;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel)}}
+.chain-card h2{{font-size:15px;line-height:1.6;margin:0 0 12px}}
+.chain-card .legend{{margin:0;display:flex;flex-wrap:wrap;gap:10px 18px;font-size:11px;color:var(--muted)}}
+.chain-card .chain{{display:block;overflow-x:auto;overscroll-behavior-x:contain;padding:8px 0;margin:0}}
+.chain-card .chain-alt{{display:none}}
+body[data-fork] .chain-card .chain-alt{{display:block}}
+.dependency-graph{{display:block;width:100%;height:auto;max-height:none;margin-inline:auto}}
+.dependency-graph marker path{{fill:var(--muted)}}
+.graph-edge{{fill:none;stroke:var(--muted);stroke-width:1.6;vector-effect:non-scaling-stroke}}
+.graph-edge.e-inferred{{stroke-dasharray:6 5;opacity:.7}}
+.graph-edge:hover{{stroke:var(--accent);stroke-width:2.5}}
+.dependency-graph .chain-node{{position:relative;display:flex;flex-direction:column;justify-content:center;gap:7px;box-sizing:border-box;width:100%;height:100%;min-width:0;max-width:none;padding:13px;border:1px solid var(--border);border-radius:9px;background:var(--card);overflow:hidden}}
+.dependency-graph .chain-node b{{font-size:14px;line-height:1.5}}
+.dependency-graph .chain-node>span{{font-size:11px;line-height:1.5;overflow-wrap:anywhere}}
+.dependency-graph .graph-state{{color:var(--dim);font-size:10px;letter-spacing:1px}}
+.dependency-graph .n-done{{border-color:color-mix(in srgb,var(--green) 40%,var(--border))}}
+.dependency-graph .n-done .graph-state{{color:var(--green)}}
+.dependency-graph .n-in_progress .graph-state{{color:var(--amber)}}
+.dependency-graph .n-stuck{{border-color:var(--red)}}
+.dependency-graph .n-stuck .graph-state{{color:var(--red)}}
+.dependency-graph .is-bn{{border:2px solid var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--card))}}
+.dependency-graph .bn{{position:static;display:block;width:fit-content;border:0;padding:0;background:none;color:var(--accent);font-size:10px}}
+.dependency-graph .is-bn .graph-state{{display:none}}
+.graph-hint{{font-size:10px;color:var(--dim);margin:4px 0 14px}}
+.edge-evidence{{border-top:1px solid var(--border);padding-top:12px;font-size:11px;color:var(--muted)}}
+.edge-evidence summary{{cursor:pointer}}
+.edge-evidence .why{{font-size:11px;line-height:1.8;padding-left:18px}}
+@media(max-width:760px){{.chain-card{{padding:16px}}}}
 </style>
 </head>
-<body><div class="wrap">{body}</div>
+<body><main class="page">{body}</main>
 <script type="application/json" id="yah">{data}</script>
 <script>__SCRIPT__</script>
 </body></html>
@@ -1871,6 +1942,34 @@ SCRIPT = r"""
   }
   function applyFrame(frame) {
     if (!frame) return;
+    var replay = document.getElementById("replay-context");
+    var historical = document.body.getAttribute("data-scrub") === "1";
+    if (replay) replay.hidden = !historical;
+    var context = document.getElementById("replay-text");
+    if (context && historical) {
+      context.textContent = "";
+      function row(label, value) {
+        if (!value) return;
+        var p = document.createElement("p");
+        p.textContent = (label ? label + ": " : "") + value;
+        context.appendChild(p);
+      }
+      var labels = DATA.labels || {}, step = frame.next_step || {};
+      row("", frame.headline);
+      row(labels.next_step, step.title);
+      row("", step.owner ? labels["owner_" + step.owner] : "");
+      row("", step.why);
+      row(labels.how, step.action);
+      row(labels.unblocks, step.unblocks);
+      var nodes = (frame.chain || {}).nodes || [];
+      var bn = nodes.filter(function (n) { return n.bottleneck; });
+      row(labels.bottleneck, bn.length ? bn.map(function (n) { return n.label; }).join(" / ") : "—");
+      var decisions = frame.decisions || [];
+      if (!decisions.length) row(labels.decisions, "—");
+      decisions.forEach(function (q) {
+        row(labels.decisions, q.question + " · " + labels.default + ": " + q.default);
+      });
+    }
     var cards = document.querySelectorAll(".part[data-link]");
     for (var i = 0; i < cards.length; i++) {
       var p = (frame.parts || {})[cards[i].getAttribute("data-link")];
@@ -1883,13 +1982,26 @@ SCRIPT = r"""
       var list = frame.milestones || [];
       for (var k = 0; k < list.length; k++) if (list[k].name === name) found = list[k];
       var st = found ? found.status : ms[j].getAttribute("data-now");
-      ms[j].classList.remove("ms-done", "ms-current", "ms-future");
-      if (st) ms[j].classList.add("ms-" + st);
+      ms[j].classList.remove("ms-done", "ms-current", "ms-future", "done", "current", "future", "reached");
+      if (st) ms[j].classList.add("ms-" + st, st);
+      var marker = ms[j].querySelector(".here");
+      if (marker) marker.textContent = DATA.labels.you_are_here;
     }
+    var last = -1, active = -1;
+    for (var index = 0; index < ms.length; index++) {
+      if (ms[index].classList.contains("done")) last = index;
+      if (ms[index].classList.contains("current")) active = index;
+    }
+    if (active < 0 && last >= 0) {
+      ms[last].classList.add("reached");
+      ms[last].querySelector(".here").textContent = DATA.labels.reached;
+    }
+    var rail = document.querySelector(".rail");
+    if (rail) rail.style.setProperty("--completed", Math.max(0, active < 0 ? last : active) / Math.max(1, ms.length - 1) * 100 + "%");
     var cap = document.getElementById("scrubcap");
     if (cap) cap.textContent = frame.label || "";
-    var changes = document.querySelector(".changes ul");
-    if (changes && frame.changes && frame.changes.length && document.body.getAttribute("data-scrub") === "1") {
+    var changes = document.querySelector(".changes-panel ul");
+    if (changes && frame.changes && historical) {
       if (!changes.getAttribute("data-saved")) changes.setAttribute("data-saved", changes.innerHTML);
       var html = "";
       for (var c = 0; c < frame.changes.length; c++) {
@@ -1901,7 +2013,7 @@ SCRIPT = r"""
     }
   }
   function restoreChanges() {
-    var changes = document.querySelector(".changes ul");
+    var changes = document.querySelector(".changes-panel ul");
     if (changes && changes.getAttribute("data-saved")) {
       changes.innerHTML = changes.getAttribute("data-saved");
       changes.removeAttribute("data-saved");
@@ -1910,30 +2022,13 @@ SCRIPT = r"""
   var scrub = document.getElementById("scrub");
   if (scrub && frames.length >= 2) {
     scrub.addEventListener("input", function () {
-      document.body.setAttribute("data-scrub", "1");
+      document.body.classList.remove("replaying");
+      if (Number(scrub.value) < frames.length - 1) document.body.setAttribute("data-scrub", "1");
+      else { document.body.removeAttribute("data-scrub"); restoreChanges(); }
       applyFrame(frames[Number(scrub.value)]);
     });
-    scrub.addEventListener("change", function () {
-      scrub.value = String(frames.length - 1);
-      document.body.removeAttribute("data-scrub");
-      applyFrame(frames[frames.length - 1]);
-      restoreChanges();
-      var cap = document.getElementById("scrubcap");
-      if (cap) cap.textContent = "";
-    });
   }
-  if (!reduce && frames.length >= 2) {
-    var a = Date.parse(frames[frames.length - 2].t || "");
-    var b = Date.parse(frames[frames.length - 1].t || "");
-    if (a && b && b - a > 6 * 3600 * 1000) {
-      applyFrame(frames[frames.length - 2]);
-      document.body.classList.add("replaying");
-      setTimeout(function () {
-        applyFrame(frames[frames.length - 1]);
-        document.body.classList.remove("replaying");
-      }, 1500);
-    }
-  }
+  // Open on the current snapshot. History is only selected by the reader.
 
   function clearFocus() {
     document.body.removeAttribute("data-focus");
@@ -1950,12 +2045,10 @@ SCRIPT = r"""
       var hit = all[i].getAttribute("data-link") === id;
       all[i].classList.toggle("on", hit);
       if (hit && all[i].classList.contains("part")) card = all[i];
-      if (hit && all[i].classList.contains("node")) node = all[i];
+      if (hit && all[i].classList.contains("chain-node")) node = all[i];
     }
     var dest = origin && origin.classList.contains("part") ? node : card;
     if (card) {
-      var box = card.closest("details");
-      if (box) box.open = true;
     }
     if (dest && dest.scrollIntoView) dest.scrollIntoView({ block: "nearest", behavior: motion() });
     if (origin && origin.classList.contains("is-bn") && card) {
@@ -1999,15 +2092,55 @@ SCRIPT = r"""
         }
       }
     }
+    if (kind === "file" && ref.charAt(0) === "/") {
+      var local = new URL("file:///");
+      local.pathname = ref;
+      href = local.href;
+    }
     document.getElementById("peek-text").textContent = text;
     var link = document.getElementById("peek-link");
-    if (href) { link.hidden = false; link.href = href; link.textContent = (DATA.labels && DATA.labels.open) || "Open"; }
+    if (href) { link.hidden = false; link.href = href; link.textContent = kind === "file" ? "打开本地证据" : ((DATA.labels && DATA.labels.open) || "Open"); }
     else link.hidden = true;
     peek.hidden = false;
     var box = btn.getBoundingClientRect();
     peek.style.top = Math.max(8, Math.min(box.bottom + 6, window.innerHeight - 110)) + "px";
     peek.style.left = Math.max(8, Math.min(box.left, window.innerWidth - 290)) + "px";
   }
+
+  var partDialog = document.getElementById("part-dialog");
+  function openPart(card) {
+    var templates = document.querySelectorAll("template[data-detail]");
+    for (var i = 0; i < templates.length; i++) {
+      if (templates[i].getAttribute("data-detail") !== card.getAttribute("data-link")) continue;
+      document.getElementById("part-detail-title").textContent = DATA.labels.part_detail;
+      var detail = document.getElementById("part-detail");
+      detail.textContent = "";
+      detail.appendChild(templates[i].content.cloneNode(true));
+      if (peek) { peek.hidden = true; partDialog.appendChild(peek); }
+      partDialog.showModal();
+      return;
+    }
+  }
+  function openStage(stage) {
+    var item = (DATA.milestones || [])[Number(stage.getAttribute("data-stage"))];
+    if (!item) return;
+    document.getElementById("part-detail-title").textContent = DATA.labels.milestone;
+    var detail = document.getElementById("part-detail");
+    detail.textContent = "";
+    var title = document.createElement("h3"); title.textContent = item.name; detail.appendChild(title);
+    var note = document.createElement("p"); note.textContent = item.note || ""; detail.appendChild(note);
+    if (item.date) { var date = document.createElement("p"); date.textContent = item.date; detail.appendChild(date); }
+    partDialog.showModal();
+  }
+  document.getElementById("close-part").addEventListener("click", function () { partDialog.close(); });
+  partDialog.addEventListener("click", function (ev) {
+    if (ev.target !== partDialog) return;
+    var box = partDialog.getBoundingClientRect();
+    if (ev.clientX < box.left || ev.clientX > box.right || ev.clientY < box.top || ev.clientY > box.bottom) partDialog.close();
+  });
+  partDialog.addEventListener("close", function () {
+    if (peek) { peek.hidden = true; document.body.appendChild(peek); }
+  });
 
   function copyText(text, li) {
     function ok() { if (li) li.classList.add("copied-on"); }
@@ -2048,6 +2181,8 @@ SCRIPT = r"""
   setInterval(tick, 30000);
 
   document.body.addEventListener("click", function (ev) {
+    var stage = ev.target.closest ? ev.target.closest("[data-stage]") : null;
+    if (stage) { openStage(stage); return; }
     var arrow = ev.target.closest ? ev.target.closest(".arrow") : null;
     if (arrow) {
       ev.stopPropagation();
@@ -2058,11 +2193,12 @@ SCRIPT = r"""
     }
     var evidence = ev.target.closest ? ev.target.closest(".ev") : null;
     if (evidence) { ev.stopPropagation(); openPeek(evidence); return; }
-    var filter = ev.target.closest ? ev.target.closest("[data-filter]") : null;
+    var filter = ev.target.closest ? ev.target.closest("button[data-filter]") : null;
     if (filter) {
       var name = filter.getAttribute("data-filter");
-      var buttons = document.querySelectorAll("[data-filter]");
-      for (var f = 0; f < buttons.length; f++) buttons[f].setAttribute("aria-pressed", buttons[f] === filter ? "true" : "false");
+      if (document.body.getAttribute("data-filter") === name) name = "all";
+      var buttons = document.querySelectorAll("button[data-filter]");
+      for (var f = 0; f < buttons.length; f++) buttons[f].setAttribute("aria-pressed", buttons[f] === filter && name !== "all" ? "true" : "false");
       if (name === "all") document.body.removeAttribute("data-filter");
       else document.body.setAttribute("data-filter", name);
       return;
@@ -2093,17 +2229,10 @@ SCRIPT = r"""
       }
       return;
     }
-    var nameBtn = ev.target.closest ? ev.target.closest(".done-name") : null;
-    if (nameBtn) {
-      ev.stopPropagation();
-      var box = nameBtn.closest("details");
-      if (box) box.open = true;
-      focusLink(nameBtn.getAttribute("data-open"), null);
-      return;
-    }
     if (peek && !peek.hidden && !(ev.target.closest && ev.target.closest("#peek"))) peek.hidden = true;
     var link = ev.target.closest ? ev.target.closest("[data-link]") : null;
-    if (link) focusLink(link.getAttribute("data-link"), link);
+    if (link && link.classList.contains("part")) openPart(link);
+    else if (link) focusLink(link.getAttribute("data-link"), link);
   });
 
   document.body.addEventListener("submit", function (ev) {
@@ -2122,10 +2251,13 @@ SCRIPT = r"""
 
   document.body.addEventListener("keydown", function (ev) {
     if (ev.key !== "Enter" && ev.key !== " ") return;
+    var stage = ev.target.closest ? ev.target.closest("[data-stage]") : null;
+    if (stage) { ev.preventDefault(); openStage(stage); return; }
     var link = ev.target.closest ? ev.target.closest("[data-link]") : null;
     if (!link || ev.target.tagName === "INPUT" || ev.target.tagName === "TEXTAREA" || ev.target.tagName === "BUTTON") return;
     ev.preventDefault();
-    focusLink(link.getAttribute("data-link"), link);
+    if (link.classList.contains("part")) openPart(link);
+    else focusLink(link.getAttribute("data-link"), link);
   });
 })();
 """
@@ -2149,6 +2281,10 @@ def cmd_render(a):
         render(repo, d)
 
 
+def map_content(m):
+    return {k: v for k, v in m.items() if k not in ("generated_at", "style")}
+
+
 def render(repo, d):
     m = load_json(os.path.join(d, "map.json"))
     if m is None:
@@ -2166,10 +2302,22 @@ def render(repo, d):
         facts["out"] = d  # in memory only: where answers.json lives
     state = load_json(os.path.join(d, "state.json"), {}) or {}
     prev = load_json(state["last_map"]) if state.get("last_map") else None
-    marks, lines = diff_maps(prev, m)
-    prev_time = (prev.get("generated_at") or state.get("last_render")) if prev else None
+    comparison = prev
+    history = os.path.join(d, "history")
+    if prev and map_content(prev) == map_content(m):
+        comparison = None
+        for name in reversed(sorted(os.listdir(history))):
+            if not name.endswith(".json"):
+                continue
+            candidate = load_json(os.path.join(history, name))
+            if isinstance(candidate, dict) and map_content(candidate) != map_content(m):
+                comparison = candidate
+                break
+    marks, lines = diff_maps(comparison, m)
+    prev_time = comparison.get("generated_at") if comparison else None
     frames = build_frames(os.path.join(d, "history"), m)
-    page = render_html(m, facts, marks, lines, style, prev_time, frames)
+    analysis = load_json(os.path.join(d, "analysis.json"))
+    page = render_html(m, facts, marks, lines, style, prev_time, frames, analysis=analysis)
     write_text(os.path.join(d, "index.html"), page)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     snap = os.path.join(d, "history", f"{stamp}.json")
@@ -2181,17 +2329,19 @@ def render(repo, d):
     dump_json(os.path.join(d, "state.json"), state)
     for x in lint(m):
         print(f"warning: {x}")
-    print(f"changes since last render: {len(lines)}" if prev else "first render (no previous map)")
+    print(f"changes since previous content update: {len(lines)}" if prev else "first render (no previous map)")
     for _, t in lines:
         print(f"  - {t}")
     print(f"html: {os.path.join(d, 'index.html')}")
 
 
-def staleness(repo, d, commits_at=5, hours=12, files_at=8):
+def staleness(repo, d, commits_at=1, hours=12, files_at=1):
     """Cheap staleness check (git only, no network, no model): status none | fresh | stale."""
     state = load_json(os.path.join(d, "state.json"), {}) or {}
     since = state.get("last_render")
-    res = {"repo": repo, "map": os.path.join(d, "index.html"), "last_render": since}
+    facts = load_json(os.path.join(d, "facts.json"), {}) or {}
+    res = {"repo": repo, "map": os.path.join(d, "index.html"), "last_render": since, "scope": "git",
+           "github_collected_at": (facts.get("github") or {}).get("collected_at")}
     if not since or not os.path.exists(os.path.join(d, "map.json")):
         res.update(status="none", reason="no map yet")
         return res
@@ -2241,7 +2391,9 @@ def cmd_status(a):
     else:
         extra = f" ({res['reason']})" if res.get("reason") else ""
         since = res.get("last_render")
-        print(f"{res['status']}{extra}" + (f" · last update {fmt_time(since)}" if since else ""))
+        external = fmt_time(res.get("github_collected_at")) or "not collected"
+        print(f"{res['status']}{extra} · git only" + (f" · last update {fmt_time(since)}" if since else "")
+              + f" · GitHub last collected: {external} (not checked by status)")
 
 
 AUTO_DEFAULTS = {"auto": False, "every_minutes": 20, "agent": "same", "notify": True}
@@ -2288,6 +2440,65 @@ def notify_after_refresh(repo, d, before):
     return " · ".join(bits)
 
 
+REFRESH_BACKOFF_MAX_MINUTES = 6 * 60
+REFRESH_PAUSE_AFTER = 5  # failures in a row before retries stop until `auto on`
+AUTH_FAILURE = re.compile(r"failed to authenticate|not logged in|please run /login|invalid api key|oauth (session|token) "
+                          r"(has )?expired", re.I)
+LOGIN_HINT = {"claude": "claude auth login", "codex": "codex login", "grok": "grok login"}
+
+
+def refresh_failure(d):
+    """The last background-refresh failure, or None once a later render replaced it."""
+    result = load_json(os.path.join(d, "refresh-result.json"), {}) or {}
+    last_render = (load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render")
+    return result if result.get("error") and result.get("last_render") == last_render else None
+
+
+def refresh_failure_error(agent, code, output):
+    """One line for the user: a login problem says how to log in, anything else points at bg.log."""
+    if AUTH_FAILURE.search(output or ""):
+        return f"the {agent} CLI is not logged in; run `{LOGIN_HINT.get(agent, agent + ' login')}` in a terminal"
+    if code:
+        return f"{agent} exited {code}; see bg.log"
+    return "the refresh did not update the map; see bg.log"
+
+
+def record_refresh_failure(repo, d, agent, code, error):
+    """Count failures in a row and back off: every_minutes, x2 each time, capped; pause after REFRESH_PAUSE_AFTER.
+    Notifies on the first failure and when retries pause, not on every retry."""
+    cfg = load_config(d)
+    n = int((refresh_failure(d) or {}).get("failures") or 0) + 1
+    wait = min(cfg.get("every_minutes", 20) * 2 ** (n - 1), REFRESH_BACKOFF_MAX_MINUTES)
+    paused = n >= REFRESH_PAUSE_AFTER
+    now = dt.datetime.now().astimezone()
+    result = {"agent": agent, "finished_at": now.isoformat(timespec="seconds"), "exit_code": code,
+              "last_render": (load_json(os.path.join(d, "state.json"), {}) or {}).get("last_render"),
+              "error": error, "failures": n, "paused": paused,
+              "retry_after": None if paused else (now + dt.timedelta(minutes=wait)).isoformat(timespec="seconds")}
+    dump_json(os.path.join(d, "refresh-result.json"), result)
+    if not (n == 1 or paused) or not cfg.get("notify", True):
+        return f"failed {n}x, quiet"
+    then = (f"retries paused after {n} failures; fix it, then run `pmap.py auto on`" if paused
+            else f"next try in {wait} min at the earliest")
+    send_notification(f"you-are-here · {os.path.basename(repo)}: background refresh failed", f"{error} ({then})")
+    return f"failed {n}x"
+
+
+def refresh_retry_blocked(d):
+    """Why a new background refresh must wait after failures, or None when it may start."""
+    fail = refresh_failure(d)
+    if not fail:
+        return None
+    if fail.get("paused"):
+        return "paused"
+    try:
+        if dt.datetime.now().astimezone() < dt.datetime.fromisoformat(fail.get("retry_after") or ""):
+            return "backoff"
+    except ValueError:
+        pass
+    return None
+
+
 def load_config(d):
     return {**AUTO_DEFAULTS, **(load_json(os.path.join(d, "config.json"), {}) or {})}
 
@@ -2305,6 +2516,10 @@ def cmd_auto(a):
         cfg["agent"] = a.agent
     if a.state or a.every or a.agent:
         dump_json(os.path.join(d, "config.json"), cfg)
+    if a.state == "on":
+        result_path = os.path.join(d, "refresh-result.json")
+        if os.path.exists(result_path):
+            os.remove(result_path)  # an explicit enable allows one new attempt
     print(json.dumps(cfg))
 
 
@@ -2315,7 +2530,14 @@ def summary_text(repo, d, budget=1800):
     if not isinstance(m, dict) or st["status"] == "none":
         return None
     lines = [f"you-are-here: project map {os.path.join(d, 'index.html')} "
-             f"({st['status']}{', ' + st['reason'] if st.get('reason') else ''})."]
+             f"({st['status']}, git only{', ' + st['reason'] if st.get('reason') else ''}).",
+             f"GitHub last collected: {st.get('github_collected_at') or 'not collected'}. Collect again before claims about current PR/CI status."]
+    fail = refresh_failure(d)
+    if fail:
+        then = ("Automatic retries are paused; fix the cause, then refresh in this session or run `pmap.py auto on`."
+                if fail.get("paused") else f"Next automatic try no earlier than {fail.get('retry_after')}.")
+        lines.append(f"Background refresh failed {fail.get('failures') or 1}x in a row "
+                     f"(last {fail.get('finished_at')}): {fail['error']}. {then}")
     if isinstance(m.get("headline"), str):
         lines.append(f"Headline: {m['headline']}")
     cur = next((s.get("name") for s in m.get("milestones") or [] if isinstance(s, dict) and s.get("status") == "current"), None)
@@ -2545,9 +2767,9 @@ def main():
     p = sp.add_parser("status", help="is the map missing, fresh or stale? (no network)")
     p.add_argument("repo", nargs="?", default=".")
     p.add_argument("--out")
-    p.add_argument("--commits", type=int, default=5, help="stale after this many new commits (default 5)")
+    p.add_argument("--commits", type=int, default=1, help="stale after this many new commits (default 1)")
     p.add_argument("--hours", type=float, default=12, help="stale after this many hours with any new change")
-    p.add_argument("--files", type=int, default=8, help="stale after this many edited files (default 8)")
+    p.add_argument("--files", type=int, default=1, help="stale after this many edited files (default 1)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(fn=cmd_status)
     p = sp.add_parser("auto", help="turn background refreshes from the plugin hooks on/off for this repo")
