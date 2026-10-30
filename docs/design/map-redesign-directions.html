@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>you-are-here 地图改版 · 三个方向</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#0d1114; --surface:#141a1f; --line:#232b31; --line-soft:#1b2328;
+  --text:#e6edf0; --text-2:#b4c0c6; --muted:#93a1a8; --faint:#6f7d84;
+  --accent:#2dd4bf; --accent-hi:#5eead4; --accent-bg:#10201e; --accent-line:#1f4a44;
+  --stuck:#ff9a5a; --stuck-text:#ffb27a; --stuck-bg:#1f1915; --stuck-line:#6b4426;
+  --moving:#4f8fd6; --moving-text:#8ec5ff; --moving-bg:#172029; --moving-line:#2a4a6b;
+  --idle:#3a454c;
+  --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:'Noto Sans SC',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}a:hover{color:var(--accent-hi)}
+code{font-family:var(--mono);color:var(--accent);font-size:.9em}
+h1,h2,p{margin:0}
+button{font:inherit;cursor:pointer}
+
+/* switcher */
+.bar{position:sticky;top:0;z-index:10;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;
+  padding:10px 16px;background:#080b0dee;border-bottom:1px solid var(--line);backdrop-filter:blur(8px)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+.tab{min-height:36px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--muted);font-size:13px}
+.tab[aria-pressed=true]{border-color:var(--accent-line);background:var(--accent-bg);color:var(--accent-hi)}
+.stage{padding:0}
+.stage.phone{display:flex;justify-content:center;padding:24px 0;background:#060809}
+.stage.phone .frame{width:390px;border:1px solid var(--line);border-radius:20px;overflow:hidden}
+.dir{display:none}.dir.on{display:block}
+
+/* shared */
+.wrap{max-width:1280px;margin:0 auto;padding:40px 24px 72px;display:flex;flex-direction:column;gap:28px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px 24px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--muted)}
+.meta{display:flex;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:13px;color:var(--muted)}
+.meta b{color:var(--text);font-weight:500}
+.pill{padding:4px 10px;border-radius:999px;border:1px solid;font-size:13px}
+.pill.good{border-color:var(--accent-line);color:var(--accent-hi)}
+.pill.warn{border-color:var(--stuck-line);color:var(--stuck-text)}
+.badge{font-size:12px;border:1px solid;border-radius:999px;padding:2px 8px;white-space:nowrap}
+.badge.moving{color:var(--moving-text);border-color:var(--moving-line)}
+.btn{white-space:nowrap;flex:0 0 auto;min-height:36px;padding:0 12px;border-radius:6px;border:1px solid #2f3940;background:transparent;color:var(--text);font-size:12px}
+.btn.primary{border-color:var(--accent-line);background:var(--accent-bg);color:var(--accent-hi)}
+.label{font-size:12px;font-weight:500}
+
+/* decisions (shared) */
+.btn.done{border-color:var(--accent);color:var(--accent-hi)}
+.ovr{display:flex;gap:8px;margin-top:8px}.ovr[hidden]{display:none}
+.ovr input{flex:1;min-width:0;min-height:36px;background:var(--bg);color:var(--text);border:1px solid #2f3940;border-radius:6px;padding:0 10px;font:inherit;font-size:13px}
+.ovr input:focus{outline:2px solid var(--accent-line);border-color:var(--accent)}
+.dec-body[hidden]{display:none}
+.dec-body{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.dec-body .d{font-size:12px;color:var(--muted)}
+.dec-acts{display:flex;gap:8px;flex-wrap:wrap}
+.dec-li.answered .q{color:var(--muted)}
+.dec-li .ans{display:none;font-size:12px;color:var(--accent-hi)}
+.dec-li.answered .ans{display:block}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);opacity:0;transition:.2s;z-index:20;
+  background:#10201e;border:1px solid var(--accent-line);color:var(--accent-hi);border-radius:10px;padding:10px 16px;font-size:13px;max-width:calc(100vw - 32px)}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+
+/* ---------- A ---------- */
+.A header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px}
+.A .title{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.A h1{font-size:36px;letter-spacing:-.02em}
+.A .headline{font-size:22px;line-height:1.55;font-weight:500}
+.A .track{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.A .ms{display:flex;flex-direction:column;gap:10px}
+.A .ms .row{display:flex;align-items:center}
+.A .dot{width:18px;height:18px;border-radius:50%;flex:0 0 auto}
+.A .dot.done{background:var(--accent)}
+.A .dot.here{background:var(--accent);box-shadow:0 0 0 5px #2dd4bf2e}
+.A .dot.future{border:2px solid var(--idle)}
+.A .dot.proposed{border:2px dashed var(--idle)}
+.A .seg{flex:1;margin:0 8px;border-top:2px solid var(--accent)}
+.A .seg.dash{border-top-style:dashed;border-top-color:var(--idle)}
+.A .ms .name{font-size:15px;font-weight:500;color:var(--text-2);padding-right:16px}
+.A .ms.here .name{font-size:17px;font-weight:700;color:var(--accent)}
+.A .ms.later .name{color:var(--muted)}
+.A .ms .sub{font-size:12px;color:var(--muted)}
+.A .cols{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start}
+.A .main{flex:999 1 640px;min-width:0;display:flex;flex-direction:column;gap:24px}
+.A aside{flex:1 1 340px;min-width:0;display:flex;flex-direction:column;gap:16px}
+.A .left-h{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.A .left-h h2{font-size:15px}
+.A .big{font-family:var(--mono);font-size:28px;color:var(--accent)}
+.A .group{display:flex;flex-direction:column;gap:8px;margin-top:8px}
+.A .stuck-row{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;padding:10px 12px;border-radius:8px;background:var(--stuck-bg)}
+.A .stuck-row span:last-child{font-size:13px;color:#c2ae9f}
+.A .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.A .mv{padding:10px 12px;border-radius:8px;background:var(--moving-bg);font-size:14px}
+.A .part{border:1px solid var(--line);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.A .part .top{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.A .part .nm{font-size:15px;font-weight:700}
+.A .part .op{font-size:13px;line-height:1.6;color:var(--text-2)}
+.A .parts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.A .next{background:var(--accent-bg);border-color:var(--accent-line);display:flex;flex-direction:column;gap:10px}
+.A .next .t{font-size:17px;font-weight:700;line-height:1.5}
+.A .next pre{margin:0;font-family:var(--mono);font-size:12px;color:var(--text-2);background:var(--bg);padding:8px 10px;border-radius:6px;white-space:pre-wrap}
+.A .dec{display:flex;flex-direction:column;gap:6px;padding:12px 0;border-top:1px solid var(--line)}
+.A .dec .q{font-size:14px;font-weight:500;line-height:1.5}
+.A .dec .d{font-size:12px;color:var(--muted)}
+.A .dec .acts{display:flex;gap:8px}
+@media (max-width:700px){
+  .A .track{grid-template-columns:1fr;gap:14px}
+  .A .ms{flex-direction:row;align-items:flex-start;gap:12px}
+  .A .seg{display:none}
+  .A .grid2,.A .parts{grid-template-columns:1fr}
+  .A .headline{font-size:18px}
+}
+.phone .A .track{grid-template-columns:1fr;gap:14px}
+.phone .A .ms{flex-direction:row;align-items:flex-start;gap:12px}
+.phone .A .seg{display:none}
+.phone .A .grid2,.phone .A .parts{grid-template-columns:1fr}
+.phone .A .headline{font-size:18px}
+.phone .A h1{font-size:28px}
+
+/* ---------- B ---------- */
+.B .wrap{max-width:860px;gap:40px;padding-top:48px}
+.B header{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:12px;border-bottom:1px solid var(--line);padding-bottom:16px}
+.B h1{font-size:26px}
+.B .brief>div{display:grid;grid-template-columns:96px minmax(0,1fr);gap:20px;padding:20px 0;border-bottom:1px solid var(--line-soft)}
+.B .k{font-size:13px;color:var(--muted);padding-top:4px}
+.B .k.warn{color:var(--stuck-text)}
+.B .now{font-size:21px;line-height:1.6;font-weight:500}
+.B .who{font-size:12px;color:var(--bg);background:var(--accent);border-radius:4px;padding:1px 6px;font-weight:700}
+.B .v{font-size:18px;font-weight:500;line-height:1.5}
+.B .s{font-size:13px;color:var(--muted)}
+.B .qrow{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;font-size:14px;color:#c9d3d8}
+.B h2{font-size:13px;color:var(--muted);font-weight:500;letter-spacing:.08em}
+.B .line{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:15px;color:var(--muted)}
+.B .line .here{color:var(--accent);font-weight:700}
+.B .line i{color:var(--idle);font-style:normal}
+.B .bar8{display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--line-soft)}
+.B .legend{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.B .srow{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;padding:12px 0;border-top:1px solid var(--line-soft);font-size:14px}
+.B .srow span:last-child{color:var(--stuck-text)}
+.B .tw{overflow-x:auto}
+.B table{width:100%;border-collapse:collapse;font-size:14px}
+.B th{text-align:left;color:var(--muted);font-size:12px;font-weight:500;padding:8px 12px 8px 0;border-bottom:1px solid var(--line)}
+.B td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.B td:first-child{font-weight:500;white-space:nowrap}
+.B td:nth-child(2){color:var(--moving-text);white-space:nowrap}
+.B td:last-child{color:var(--text-2);line-height:1.6}
+.B details summary{min-height:44px;display:flex;align-items:center;cursor:pointer;color:var(--muted);font-size:14px}
+.phone .B .brief>div{grid-template-columns:1fr;gap:6px}
+.phone .B .srow{grid-template-columns:1fr;gap:4px}
+.phone .B .now{font-size:18px}
+@media (max-width:700px){.B .brief>div{grid-template-columns:1fr;gap:6px}.B .srow{grid-template-columns:1fr;gap:4px}}
+
+/* ---------- C ---------- */
+.C header{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:16px}
+.C h1{font-size:32px;letter-spacing:-.02em}
+.C .headline{font-size:19px;line-height:1.6;max-width:900px;color:var(--text-2)}
+.C .headline b{color:var(--text);font-weight:500}
+.C .metro{position:relative;padding:28px 24px 24px;overflow-x:auto}
+.C .mainline{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));min-width:760px;position:relative}
+.C .mainline::before{content:"";position:absolute;left:9px;right:9px;top:9px;height:4px;background:linear-gradient(90deg,var(--accent) 0 30%,var(--idle) 30% 100%);border-radius:2px}
+.C .st{position:relative;display:flex;flex-direction:column;gap:6px;padding-right:12px}
+.C .st .o{width:22px;height:22px;border-radius:50%;background:var(--bg);border:4px solid var(--idle);z-index:1}
+.C .st.done .o{border-color:var(--accent);background:var(--accent)}
+.C .st.here .o{border-color:var(--accent);box-shadow:0 0 0 6px #2dd4bf2e}
+.C .st .n{font-size:15px;font-weight:700;margin-top:6px}
+.C .st.here .n{color:var(--accent)}
+.C .st.later .n{color:var(--muted);font-weight:500}
+.C .st .m{font-size:12px;color:var(--muted)}
+.C .branches{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:16px;margin-top:28px;min-width:760px}
+.C .br{border-left:4px solid var(--moving);padding:4px 0 4px 16px;display:flex;flex-direction:column;gap:10px}
+.C .br.stuck{border-left-color:var(--stuck)}
+.C .br h3{margin:0;font-size:14px;display:flex;gap:8px;align-items:baseline}
+.C .br h3 span{font-family:var(--mono);font-size:12px;color:var(--muted);font-weight:400}
+.C .stop{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.5;color:var(--text-2)}
+.C .stop::before{content:"";flex:0 0 auto;width:10px;height:10px;margin-top:5px;border-radius:50%;border:2px solid var(--moving)}
+.C .br.stuck .stop::before{border-color:var(--stuck);background:var(--stuck)}
+.C .stop em{display:block;font-style:normal;font-size:12px;color:var(--stuck-text)}
+.C .lower{display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start}
+.C .lower>*{flex:1 1 360px;min-width:0}
+.C .idx{display:flex;flex-direction:column}
+.C .idx div{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid var(--line-soft);font-size:14px}
+.C .idx div span:last-child{color:var(--muted);font-size:13px;text-align:right}
+.C .ask{display:flex;flex-direction:column;gap:10px}
+.C .qa{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:14px}
+.phone .C .headline{font-size:16px}
+.phone .C h1{font-size:26px}
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="tabs" role="group" aria-label="方向">
+    <button class="tab" data-dir="A" aria-pressed="true">A · 原样修问题</button>
+    <button class="tab" data-dir="B" aria-pressed="false">B · 晨报单列</button>
+    <button class="tab" data-dir="C" aria-pressed="false">C · 路线图</button>
+  </div>
+  <div class="tabs" role="group" aria-label="宽度">
+    <button class="tab" data-w="desk" aria-pressed="true">桌面</button>
+    <button class="tab" data-w="phone" aria-pressed="false">手机 390</button>
+  </div>
+</div>
+
+<div class="stage" id="stage"><div class="frame">
+
+<!-- ================= A ================= -->
+<section class="dir A on" id="A">
+<div class="wrap">
+  <header>
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div class="eyebrow">YOU ARE HERE · 项目地图</div>
+      <div class="title"><h1>keepline</h1><span style="font-size:14px;color:var(--muted)">多会话 Codex / Claude Code 的桌面工作台</span></div>
+    </div>
+    <div class="meta"><span>更新 <b>10-30 18:01</b></span><span>自上次 <b>130</b> 提交</span><span>GitHub <b>10-30 17:54</b></span><a href="#">majiayu000/keepline ↗</a></div>
+  </header>
+
+  <div class="card" style="display:flex;flex-direction:column;gap:14px">
+    <p class="headline" data-slot="headline"></p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><span class="pill good">3 项变好</span><span class="pill warn">3 项卡住</span><span class="pill warn">4 项等你决定</span></div>
+  </div>
+
+  <div class="track">
+    <div class="ms"><div class="row"><div class="dot done"></div><div class="seg"></div></div><div><div class="name">v1.1.4</div><div class="sub">已完成 · 09-26</div></div></div>
+    <div class="ms here"><div class="row"><div class="dot here"></div><div class="seg dash"></div></div><div><div class="name">Agent 工作台首个可验收本地 App</div><div class="sub">你在这里 · 还剩 16 项</div></div></div>
+    <div class="ms later"><div class="row"><div class="dot future"></div><div class="seg dash"></div></div><div><div class="name">1.2.0 菜单栏候选</div><div class="sub">未开始</div></div></div>
+    <div class="ms later"><div class="row"><div class="dot proposed"></div></div><div><div class="name">工作台正式签名与发布</div><div class="sub">未开始 · 提议中的里程碑</div></div></div>
+  </div>
+
+  <div class="cols">
+    <div class="main">
+      <div class="card">
+        <div class="left-h"><h2>离当前里程碑还剩</h2><span class="big">16</span><span style="font-size:13px;color:var(--muted)">卡住 3 · 进行中 11 · 未开始 2</span></div>
+        <div class="group"><div class="label" style="color:var(--stuck-text)">卡住</div><div data-slot="A-stuck" style="display:flex;flex-direction:column;gap:8px"></div></div>
+        <div class="group" style="margin-top:16px"><div class="label" style="color:var(--moving-text)">进行中 · 显示 4 / 11</div><div class="grid2" data-slot="A-moving"></div>
+          <a href="#" style="font-size:13px;padding:8px 0">展开其余 7 项与未开始 2 项</a></div>
+      </div>
+      <div class="card">
+        <div class="left-h" style="justify-content:space-between"><h2>项目组成 <span style="color:var(--muted);font-weight:400">· 7 个模块，0 个完成</span></h2><span style="font-size:12px;color:var(--muted)">点模块看依据</span></div>
+        <div class="parts" data-slot="A-parts"></div>
+      </div>
+    </div>
+    <aside>
+      <div class="card next">
+        <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--accent-hi);font-weight:500">下一步</span><span style="color:var(--muted)">agent 做</span></div>
+        <div class="t" data-slot="next"></div>
+        <pre>gh run watch 41036511583</pre>
+        <div style="font-size:13px;color:var(--muted)">解锁：插件与多 Agent 接入可交给你验收</div>
+      </div>
+      <div class="card" style="padding-bottom:16px">
+        <div class="label" style="color:var(--stuck-text);padding-bottom:6px">等你决定 · 4</div>
+        <div data-slot="A-dec"></div>
+        <div style="font-size:12px;color:var(--faint);padding-top:6px">按钮复制一行命令，贴回给 agent 即可</div>
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;gap:8px">
+        <div class="label" style="color:var(--muted)">拿不准</div>
+        <div data-slot="A-unc" style="display:flex;flex-direction:column;gap:6px;font-size:13px;line-height:1.6;color:var(--text-2)"></div>
+      </div>
+    </aside>
+  </div>
+</div>
+</section>
+
+<!-- ================= B ================= -->
+<section class="dir B" id="B">
+<div class="wrap">
+  <header>
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap"><h1>keepline</h1><span class="eyebrow" style="letter-spacing:.08em">晨报 · 10-30 周五 18:01</span></div>
+    <span class="meta" style="font-size:12px">自上次 130 提交 · GitHub 10-30 17:54</span>
+  </header>
+  <div class="brief">
+    <div><span class="k">现在</span><p class="now" data-slot="headline"></p></div>
+    <div><span class="k">下一步</span>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap"><span class="who">agent</span><span class="v" data-slot="next"></span></div>
+        <span class="s">做完之后：插件与多 Agent 接入可以交给你验收</span>
+      </div></div>
+    <div><span class="k warn">等你</span>
+      <div style="display:flex;flex-direction:column;gap:12px"><span class="v">4 项决定，默认都是「先不动」</span><div data-slot="B-dec" style="display:flex;flex-direction:column;gap:10px"></div></div></div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:16px">
+    <h2>里程碑</h2>
+    <div class="line"><span>v1.1.4 ✓</span><i>──</i><span class="here">◉ Agent 工作台首个可验收本地 App</span><i>┈┈</i><span>1.2.0 菜单栏候选</span><i>┈┈</i><span>正式签名与发布（提议）</span></div>
+    <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted)"><span>剩余项 25 中完成 9</span><span>36%</span></div>
+    <div class="bar8"><div style="width:36%;background:var(--accent)"></div><div style="width:12%;background:var(--stuck)"></div><div style="width:44%;background:var(--moving)"></div></div>
+    <div class="legend"><span><b style="color:var(--accent)">■</b> 完成 9</span><span><b style="color:var(--stuck)">■</b> 卡住 3</span><span><b style="color:var(--moving)">■</b> 进行中 11</span><span><b style="color:var(--idle)">■</b> 未开始 2</span></div>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:12px"><h2>卡住的 3 项</h2><div data-slot="B-stuck"></div></div>
+
+  <div style="display:flex;flex-direction:column;gap:12px"><h2>项目组成</h2>
+    <div class="tw"><table><thead><tr><th>模块</th><th>状态</th><th>还差</th></tr></thead><tbody data-slot="B-parts"></tbody></table></div></div>
+
+  <details style="border-top:1px solid var(--line);padding-top:8px"><summary>依据、拿不准的事、历史</summary></details>
+</div>
+</section>
+
+<!-- ================= C ================= -->
+<section class="dir C" id="C">
+<div class="wrap">
+  <header>
+    <div style="display:flex;flex-direction:column;gap:6px"><div class="eyebrow">YOU ARE HERE · 路线图</div><h1>keepline</h1></div>
+    <div class="meta"><span>更新 <b>10-30 18:01</b></span><span>自上次 <b>130</b> 提交</span></div>
+  </header>
+  <p class="headline"><b>本周合并 7 个 PR，CI 转绿。</b>工作台改版、四家 Agent 接入和插件系统已落地；离可验收的本地 App 还有 3 条支线，其中「原生验收」一条在等你。</p>
+
+  <div class="card metro">
+    <div class="mainline">
+      <div class="st done"><div class="o"></div><div class="n">v1.1.4</div><div class="m">已完成 · 09-26</div></div>
+      <div class="st here"><div class="o"></div><div class="n">Agent 工作台首个可验收本地 App</div><div class="m">你在这里 · 还剩 16 项</div></div>
+      <div class="st later"><div class="o"></div><div class="n">1.2.0 菜单栏候选</div><div class="m">未开始</div></div>
+      <div class="st later"><div class="o" style="border-style:dashed"></div><div class="n">正式签名与发布</div><div class="m">提议中</div></div>
+    </div>
+    <div class="branches" data-slot="C-br"></div>
+  </div>
+
+  <div class="lower">
+    <div class="card next" style="background:var(--accent-bg);border-color:var(--accent-line);display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--accent-hi);font-weight:500">下一站</span><span style="color:var(--muted)">agent 做</span></div>
+      <div style="font-size:17px;font-weight:700;line-height:1.5" data-slot="next"></div>
+    </div>
+    <div class="card ask"><div class="label" style="color:var(--stuck-text)">等你决定 · 4</div><div data-slot="C-dec" style="display:flex;flex-direction:column;gap:10px"></div></div>
+    <div class="card"><div class="label" style="color:var(--muted);margin-bottom:6px">模块索引 · 7</div><div class="idx" data-slot="C-idx"></div></div>
+  </div>
+</div>
+</section>
+
+</div></div>
+
+<script>
+const D = {
+  headline: '本周 main 进 120 个提交、合并 7 个 PR：工作台主界面改版、后台无缝换新、Cursor/Grok/OpenCode/Qoder 接入和插件系统落地；main CI 在 <code>b537c7a</code> 转绿。原生验收与发布仍等你。',
+  next: '等 main 上两次 CI 跑完，再在干净 App 里验 Cursor / Qoder 接回',
+  stuck: [
+    ['最终候选原生人工验收', '等你亲手在 App 里验'],
+    ['补齐原生可见使用验收', 'Finder/Dock、输入法、多会话未核对'],
+    ['真实通知与官方模型回合验收', '等你授权通知权限和模型额度'],
+  ],
+  moving: ['现有 GPUI 视觉重做与原生输入验收', 'Codex 身份识别（临时 --no-daemon）', '对话内容层：卡片、分组、鸟瞰', 'M6 完整使用验收与本地 .app 打包'],
+  parts: [
+    ['进度账本', '轻量概览后续在草稿 #148；真实用户接手效率待验。'],
+    ['Web 面板 UI', '#148 后续草稿；整页人工接受待收口。'],
+    ['监控与恢复核心服务', '对照 #148 与当前工作树确认覆盖范围。'],
+    ['macOS 菜单栏应用', '真实通知投递、点击、撤回缺完整验收。'],
+    ['CI 与发布流程', '发行与原生接受需要独立证据。'],
+    ['Rust 后台与 GPUI 基础', '干净环境、打包、原生整体验收分别核对。'],
+    ['Agent 终端工作台', '核对后续补丁与实际使用。'],
+  ],
+  decisions: [
+    ['工作台是否做正式签名与发布？', '保留本地候选，等验收和授权'],
+    ['是否先完成并发布旧 1.2.0 菜单栏候选？', '保留候选，等验收和授权'],
+    ['是否授权调整系统通知权限并验收真实通知？', '保持权限不变，通知标未验证'],
+    ['是否授权真实模型调用及额度用于最终验收？', '不花额度，真实交互标未验证'],
+  ],
+  uncertain: ['main 最近 7 次 CI 中 5 次失败，仅 b537c7a 转绿。', '本周新功能多为单测与临时 daemon 验证。', '2 小时浸泡是 10-21 旧版本证据。'],
+  branches: [
+    { name: '原生验收', stuck: true, stops: [['最终候选原生人工验收', '等你亲手验'], ['补齐原生可见使用验收', '等你核对桌面'], ['真实通知与官方模型回合', '等你授权']] },
+    { name: '识别与接入', stops: [['Codex 身份识别', ''], ['M5 Claude Code 识别', ''], ['插件系统与声明式 Agent', ''], ['旧 #145 通知覆盖复核', '']] },
+    { name: '界面与终端', stops: [['GPUI 视觉重做与输入验收', ''], ['对话内容层', ''], ['收口并行终端渲染差距', ''], ['M6 使用验收与打包', ''], ['干净环境依赖验证', ''], ['UI 原稿差异收口', '']] },
+  ],
+};
+const h = (s) => s; // data above is trusted, hand-written
+const fill = (k, html) => document.querySelectorAll(`[data-slot="${k}"]`).forEach(el => el.innerHTML = html);
+
+fill('headline', D.headline);
+fill('next', D.next);
+fill('A-stuck', D.stuck.map(([l, w]) => `<div class="stuck-row"><span style="font-size:14px;font-weight:500">${l}</span><span>${w}</span></div>`).join(''));
+fill('A-moving', D.moving.map(x => `<div class="mv">${x}</div>`).join(''));
+fill('A-parts', D.parts.map(([n, o]) => `<div class="part"><div class="top"><span class="nm">${n}</span><span class="badge moving">进行中</span></div><span class="op">还差：${o}</span></div>`).join(''));
+const acts = (i) => `<div class="dec-acts"><button type="button" class="btn primary" data-accept="${i}">接受默认</button><button type="button" class="btn" data-override="${i}">改口</button></div>
+  <form class="ovr" data-form="${i}" hidden><input type="text" maxlength="240" placeholder="你的答案" aria-label="你的答案"><button type="submit" class="btn primary">复制</button></form>`;
+fill('A-dec', D.decisions.map(([q, d], i) => `<div class="dec dec-li" data-i="${i}"><span class="q">${q}</span><span class="d">默认：${d}</span><span class="ans"></span>${acts(i)}</div>`).join(''));
+fill('A-unc', D.uncertain.map(u => `<span>· ${u}</span>`).join(''));
+const fold = ([q, d], i) => `<div class="dec-li" data-i="${i}"><div class="qrow"><span class="q">${q}</span><button type="button" class="btn" data-open="${i}" aria-expanded="false">回答</button></div>
+  <span class="ans"></span><div class="dec-body" hidden><span class="d">默认：${d}</span>${acts(i)}</div></div>`;
+fill('B-dec', D.decisions.map(fold).join(''));
+fill('B-stuck', D.stuck.map(([l, w]) => `<div class="srow"><span style="font-weight:500">${l}</span><span>${w}</span></div>`).join(''));
+fill('B-parts', D.parts.map(([n, o]) => `<tr><td>${n}</td><td>进行中</td><td>${o}</td></tr>`).join(''));
+fill('C-br', D.branches.map(b => `<div class="br${b.stuck ? ' stuck' : ''}"><h3>${b.name}<span>${b.stops.length} 项</span></h3>${b.stops.map(([s, w]) => `<div class="stop"><div>${s}${w ? `<em>${w}</em>` : ''}</div></div>`).join('')}</div>`).join(''));
+fill('C-dec', D.decisions.map(fold).join('').replaceAll('class="qrow"', 'class="qa"'));
+fill('C-idx', D.parts.map(([n, o]) => `<div><span>${n}</span><span>进行中</span></div>`).join(''));
+
+const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status'); document.body.append(toast);
+let tt; const say = (m) => { toast.textContent = m; toast.classList.add('on'); clearTimeout(tt); tt = setTimeout(() => toast.classList.remove('on'), 2600); };
+const REPO = '/Users/lifcc/Desktop/code/AI/tools/keepline';
+const PM = '~/.claude/plugins/cache/you-are-here/you-are-here/0.2.1/skills/you-are-here/scripts/pmap.py';
+const answerText = (i, a) => `you-are-here decision\nQuestion: ${D.decisions[i][0]}\nAnswer: ${a}\nRecord it and act on it: python3 ${PM} answer ${REPO} --id d${i} --answer "${a.replaceAll('"', "'")}"`;
+async function copy(t) {
+  try { await navigator.clipboard.writeText(t); return true; } catch (e) {
+    const ta = Object.assign(document.createElement('textarea'), { value: t }); document.body.append(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e2) {} ta.remove(); return ok;
+  }
+}
+async function answer(i, a) {
+  const ok = await copy(answerText(i, a));
+  document.querySelectorAll(`.dec-li[data-i="${i}"]`).forEach(li => {
+    li.classList.add('answered');
+    li.querySelector('.ans').textContent = `你选了：${a}${ok ? '（已复制）' : ''}`;
+    const acc = li.querySelector('[data-accept]'); acc.textContent = '已复制 ✓'; acc.classList.add('done');
+    li.querySelector('[data-form]').hidden = true;
+  });
+  say(ok ? '已复制。贴回给 agent，它会记下并照做' : '复制失败，请手动选中文字复制');
+}
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('button'); if (!t) return;
+  if (t.dataset.accept) answer(+t.dataset.accept, D.decisions[+t.dataset.accept][1]);
+  if (t.dataset.override) { const f = t.closest('.dec-li').querySelector('[data-form]'); f.hidden = !f.hidden; if (!f.hidden) f.querySelector('input').focus(); }
+  if (t.dataset.open) { const b = t.closest('.dec-li').querySelector('.dec-body'); b.hidden = !b.hidden; t.setAttribute('aria-expanded', !b.hidden); t.textContent = b.hidden ? '回答' : '收起'; }
+});
+document.addEventListener('submit', (e) => {
+  const f = e.target.closest('[data-form]'); if (!f) return; e.preventDefault();
+  const v = f.querySelector('input').value.trim(); if (!v) { f.querySelector('input').focus(); return; }
+  answer(+f.dataset.form, v);
+});
+
+const stage = document.getElementById('stage');
+document.querySelectorAll('[data-dir]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('[data-dir]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  document.querySelectorAll('.dir').forEach(s => s.classList.toggle('on', s.id === b.dataset.dir));
+});
+document.querySelectorAll('[data-w]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('[data-w]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  stage.classList.toggle('phone', b.dataset.w === 'phone');
+});
+const q = new URLSearchParams(location.search);
+if (q.get('dir')) document.querySelector(`[data-dir="${q.get('dir')}"]`)?.click();
+if (q.get('w') === 'phone') document.querySelector('[data-w="phone"]').click();
+</script>
+</body>
+</html>

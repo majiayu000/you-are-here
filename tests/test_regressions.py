@@ -92,6 +92,22 @@ class MapMeaning(unittest.TestCase):
         self.assertIn("46/46 tests", changes[0][1])
         self.assertIn("6/6 CI environments", changes[0][1])
 
+    def test_brief_leads_the_page(self):
+        m = copy.deepcopy(MAP)
+        m["headline"] = "Parser landed; docs untouched."
+        m["remaining"] = [{"id": f"r{i}", "label": f"item {i}", "status": "in_progress"} for i in range(6)]
+        m["remaining"].append({"id": "blocked", "label": "blocked item", "status": "stuck", "note": "waits on the API"})
+        page = pmap.render_html(m, {}, {}, [], {"theme": "dark", "accent": "#2dd4bf"}, None)
+        brief = page.index('class="panel brief"')
+        self.assertLess(brief, page.index('class="route track"'))  # headline, next step and decisions come first
+        self.assertIn(m["headline"], page[brief:page.index('class="route track"')])
+        self.assertNotIn("headline-note", page)
+        self.assertIn('data-question="ship?"', page)
+        self.assertIn('id="toast"', page)
+        self.assertIn('<span class="rn">waits on the API</span>', page)  # stuck items say what they wait on
+        self.assertEqual(page.count('class="ri r-in_progress'), 6)
+        self.assertIn("展开其余 2 项", page)  # four moving items shown, the rest folded
+
     def test_goal_can_be_undecided_and_done_items_are_not_remaining(self):
         m = copy.deepcopy(MAP)
         m["milestones"] = m["milestones"][:1]

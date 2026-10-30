@@ -1043,7 +1043,10 @@ TEXT = {
            "part_detail": "当前模块详情", "close": "关闭", "collection": "采集依据", "scrub_then": "当时", "scrub_now": "现在", "expiring": "将到期",
            "open_link": "在 GitHub 打开", "waits": "等你确认",
            "better": "变好", "worse": "变坏", "needs_you": "等你", "owner_user": "你来做", "owner_agent": "agent 来做",
-           "unblocks": "做完解锁", "how": "怎么做", "open_left": "还差", "answered": "你已回答", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制"},
+           "unblocks": "做完解锁", "how": "怎么做", "open_left": "还差", "answered": "你已回答", "since_label": "自", "nothing_new": "没有新变化", "fork_if": "若改口", "copy_hint": "复制后贴回给 agent", "copy": "复制",
+           "brief_now": "现在", "brief_next": "下一步", "brief_wait": "等你", "n_decisions": "项决定",
+           "show_rest": "展开其余", "you_chose": "你选了", "copied_toast": "已复制。贴回给 agent，它会记下并照做",
+           "copy_failed": "复制失败，请手动选中文字复制"},
     "en": {"done": "Done", "in_progress": "In progress", "not_started": "Not started", "stuck": "Stuck",
            "scope_changed": "Measure changed", "goal_unknown": "Next goal undecided", "collected": "collected", "not_collected": "not collected",
            "suggested_order": "Suggested order", "replay_context": "At that time", "replay_hint": "Replay shows the next step, bottleneck and decisions from that snapshot; part descriptions and evidence remain current.",
@@ -1064,7 +1067,10 @@ TEXT = {
            "expiring": "expiring", "open_link": "Open on GitHub", "waits": "waits for you",
            "better": "better", "worse": "worse", "needs_you": "need you", "owner_user": "You", "owner_agent": "Agent",
            "unblocks": "Unblocks", "how": "How", "open_left": "Still open", "answered": "You answered", "since_label": "since", "nothing_new": "Nothing new", "fork_if": "If you override",
-           "copy_hint": "Copy, then paste back to the agent", "copy": "Copy"},
+           "copy_hint": "Copy, then paste back to the agent", "copy": "Copy",
+           "brief_now": "Now", "brief_next": "Next", "brief_wait": "Needs you", "n_decisions": "decisions",
+           "show_rest": "Show the other", "you_chose": "You chose", "copied_toast": "Copied. Paste it back to the agent; it records the answer and acts on it",
+           "copy_failed": "Copy failed; select the text and copy it by hand"},
 }
 
 
@@ -1530,22 +1536,36 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
             f'<h2>{r(stage["name"])}</h2><p class="ms-note">{r(note)}</p>{prop}</li>')
     rem = [x for x in m.get("remaining") or [] if x["status"] != "done"]
     cur_name = next((stage["name"] for stage in ms if stage["status"] == "current"), "")
-    pills = []
-    for item in rem:
+    # Stuck items first with what they wait on, a few moving ones, the rest one click away.
+    def rem_item(item):
         lid = link_of(item, by_id, by_name)
         link = f' data-link="{attr(lid)}" role="button" tabindex="0"' if lid else ""
-        visual = {"in_progress": "progress", "stuck": "blocked"}.get(item["status"], "")
-        pills.append(f'<span class="pill {visual} p-{item["status"]}{" linkable" if lid else ""}"{link}>'
-                     f'<i class="dot"></i>{r(item["label"])}</span>')
-    remaining = (f'<div class="remaining"><span class="remaining-label">{L["left_for"]} {r(cur_name)} '
-                 f'<strong class="big">{len(rem)}</strong> {L["items"]}</span>{"".join(pills)}</div>') if rem else ""
+        note = f'<span class="rn">{r(item["note"])}</span>' if item["status"] == "stuck" and item.get("note") else ""
+        return (f'<li class="ri r-{cls(item["status"], PART_STATUS, "not_started")}{" linkable" if lid else ""}"{link}>'
+                f'<span class="rl">{r(item["label"])}</span>{note}</li>')
+    groups = {k: [x for x in rem if x["status"] == k] for k in ("stuck", "in_progress", "not_started")}
+    shown_moving = 4
+    rest = groups["in_progress"][shown_moving:] + groups["not_started"]
+    counts = " · ".join(f'{L[k]} {len(v)}' for k, v in groups.items() if v)
+    blocks = []
+    if groups["stuck"]:
+        blocks.append(f'<p class="rg-h r-stuck">{L["stuck"]}</p><ul class="rg rg-stuck">{"".join(map(rem_item, groups["stuck"]))}</ul>')
+    if groups["in_progress"]:
+        blocks.append(f'<p class="rg-h r-in_progress">{L["in_progress"]}</p>'
+                      f'<ul class="rg rg-moving">{"".join(map(rem_item, groups["in_progress"][:shown_moving]))}</ul>')
+    if rest:
+        blocks.append(f'<details class="rg-more"><summary>{L["show_rest"]} {len(rest)} {L["items"]}</summary>'
+                      f'<ul class="rg rg-moving">{"".join(map(rem_item, rest))}</ul></details>')
+    remaining = (f'<section class="panel remaining"><div class="remaining-head"><span class="remaining-label">{L["left_for"]} '
+                 f'{r(cur_name)} <strong class="big">{len(rem)}</strong> {L["items"]}</span>'
+                 f'<span class="rg-counts">{counts}</span></div>{"".join(blocks)}</section>') if rem else ""
     if not has_current:
         remaining = f'<div class="remaining goal-unknown"><span class="remaining-label">{L["goal_unknown"]}</span></div>' + remaining
     offset = 50 / max(1, len(ms))
     completed = max(0, last_position) / max(1, len(ms) - 1) * 100
     track = (f'<section class="route track"><ol class="milestones" style="--stages:{max(1,len(ms))}">'
              f'<li class="rail" role="presentation" aria-hidden="true" style="left:{offset}%;right:{offset}%;--completed:{completed}%"></li>'
-             f'{"".join(nodes)}</ol>{remaining}</section>') if ms else f'<section class="route">{remaining}</section>'
+             f'{"".join(nodes)}</ol></section>') if ms else ""
 
     # blocker chain. A decision with options splits a second, quieter path.
     chain = ""
@@ -1636,7 +1656,7 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
         stray_html = (f'<div class="unmap"><span class="tag">{html.escape(L["unmapped"])}</span>'
                       f'<ul class="plain">{chips}</ul></div>')
     n_done = sum(p["status"] == "done" for p in parts)
-    columns = 4 if len(parts) > 6 else 3
+    columns = 3 if len(parts) > 4 else 2
     parts_html = (f'<section class="panel parts-panel"><div class="panel-heading"><div class="panel-title">'
                   f'<h2>{L["parts"]}</h2><span class="completion"><strong>{n_done}</strong> / {len(parts)} {L["of_done"]}</span>'
                   f'</div>{highlight}</div><div class="parts" style="--columns:{columns}">{"".join(cards)}</div>'
@@ -1644,16 +1664,24 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
                   f'{localized("青绿标记 = 本轮有变化", "Accent mark = changed this round")}</span>'
                   f'<span>{localized("点击模块，查看任务与依据 ↗", "Click a part for tasks & evidence ↗")}</span></div></section>')
 
-    # Desktop actions occupy the right column; CSS places the next step first on mobile.
+    # The brief answers three questions first: where things stand, what happens next, what waits for you.
     ns = m["next_step"]
     owner = ns.get("owner") if ns.get("owner") in OWNERS else None
-    who = f'<span class="owner o-{owner}" title="{attr(L["owner_" + owner])}">↗</span>' if owner else ""
+    who = f'<span class="owner o-{owner}">{html.escape(L["owner_" + owner])}</span>' if owner else ""
     how = (f'<p class="how"><span>{L["how"]}</span> {r(ns["action"])}</p>' if ns.get("action") else "")
     unl = (f'<p class="unl"><span>{L["unblocks"]}</span> {r(ns["unblocks"])}</p>' if ns.get("unblocks") else "")
-    next_html = (f'<section class="panel action-panel next-panel next"><div class="eyebrow">{L["next_step"]}{who}</div><h2 class="nt">{r(ns["title"])}</h2>'
-                 f'<p>{r(ns.get("why") or "")}</p>'
-                 + (f'<details><summary>{L["how"]}</summary>{how}{unl}</details>' if how or unl else "") + "</section>")
-    side = [next_html]
+    why = f'<p class="why-line">{r(ns["why"])}</p>' if ns.get("why") else ""
+    brief = []
+    if headline:
+        brief.append(f'<div class="brief-row now"><span class="brief-k">{L["brief_now"]}</span>'
+                     f'<p class="headline">{r(headline)}</p></div>')
+    elif not has_current:
+        brief.append(f'<div class="brief-row now"><span class="brief-k">{L["brief_now"]}</span>'
+                     f'<p class="headline">{L["goal_unknown"]}</p></div>')
+    brief.append(f'<div class="brief-row next"><span class="brief-k">{L["brief_next"]}</span><div class="brief-v">'
+                 f'<p class="nt">{who}{r(ns["title"])}</p>{why}'
+                 + (f'<details><summary>{L["how"]}</summary>{how}{unl}</details>' if how or unl else "") + "</div></div>")
+    side = []
     answers = load_answers(out_dir_of(facts)) if facts else []
     if m.get("decisions"):
         qs = []
@@ -1680,28 +1708,28 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
                        f'data-option="{other}" data-show="{attr(L["see_path"])}" data-hide="{attr(L["hide_path"])}">'
                        f'{html.escape(L["see_path"])}</button>')
             if ans:
-                qs.append(f'<li class="answered" data-decision="{attr(did)}"><p class="q">{r(q["question"])}</p>'
+                qs.append(f'<li class="answered" data-decision="{attr(did)}" data-question="{attr(q["question"])}"><p class="q">{r(q["question"])}</p>'
                           f'<p class="d">{L["answered"]} → <b class="def">{r(ans["answer"])}</b> '
                           f'<span class="t">{fmt_time(ans.get("at"))}</span></p></li>')
                 continue
             qs.append(
-                f'<li data-decision="{attr(did)}">'
+                f'<li data-decision="{attr(did)}" data-question="{attr(q["question"])}" data-default="{attr(q["default"])}">'
                 f'<p class="q">{r(q["question"])}{prop}</p>'
                 f'<p class="d">{when}<b class="def">{r(q["default"])}</b></p>'
                 f'<p class="taken">{html.escape(L["default_taken"])}</p>'
+                f'<p class="chosen" hidden></p>'
                 f'<div class="acts">'
                 f'<button type="button" class="act accept" data-copy="{copy}">{html.escape(L["accept"])}</button>'
                 f'{alt}'
-                f'<button type="button" class="act override">{html.escape(L["override"])}</button>'
-                f'<span class="copied">{html.escape(L["copied"])}</span></div>'
+                f'<button type="button" class="act override" aria-expanded="false">{html.escape(L["override"])}</button></div>'
                 f'<form class="override-form" hidden>'
                 f'<input type="text" maxlength="240" aria-label="{attr(L["override"])}">'
-                f'<button type="submit">{html.escape(L["copy"])}</button></form>'
-                f'<p class="hint">{html.escape(L["copy_hint"])}</p></li>')
-        side.append(f'<section class="panel action-panel decision-panel decide"><div class="eyebrow">{L["decisions"]}</div><ul>{"".join(qs)}</ul></section>')
-    elif headline:
-        side.append(f'<section class="panel action-panel current-panel"><div class="eyebrow">{localized("当前进展", "Where things stand")}</div>'
-                    f'<h2>{r(headline)}</h2><p>{L["goal_unknown"] if not has_current else r(cur_name)}</p></section>')
+                f'<button type="submit">{html.escape(L["copy"])}</button></form></li>')
+        n_open = sum(1 for q in m["decisions"] if not answer_for(q, answers))
+        brief.append(f'<div class="brief-row decide"><span class="brief-k">{L["brief_wait"]}</span><div class="brief-v">'
+                     f'<p class="nt">{n_open} {L["n_decisions"]}</p><ul>{"".join(qs)}</ul>'
+                     f'<p class="hint">{html.escape(L["copy_hint"])}</p></div></div>')
+    brief_html = f'<section class="panel brief">{"".join(brief)}</section>'
     since = f'<span class="since">{fmt_time(prev_time)}</span>' if prev_time else ""
     if change_lines:
         rows = []
@@ -1725,16 +1753,14 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
                  for c in commits)
     side.append(f'<section class="panel changes-panel"><h2 class="eyebrow"><i class="change-marker"></i>{L["changes"]}</h2>'
                 f'<ul class="change-list">{cl}</ul>{since}</section>')
+    if m.get("uncertain"):
+        side.append(f'<section class="panel uncertain-panel"><h2 class="eyebrow">{L["uncertain"]} · {len(m["uncertain"])}</h2>'
+                    '<ul class="plain">' + "".join(f"<li>{r(x)}</li>" for x in m["uncertain"]) + "</ul></section>")
 
     # detail panels
     det = []
-    if m.get("uncertain"):
-        det.append(f'<details><summary><b>{L["uncertain"]} · {len(m["uncertain"])}</b></summary><ul class="plain">'
-                   + "".join(f"<li>{r(x)}</li>" for x in m["uncertain"]) + "</ul></details>")
     if cm:
         det.append(f'<details><summary><b>{L["recent_commits"]}</b></summary><ul class="commits">{cm}</ul></details>')
-    if headline and m.get("decisions"):
-        det.append(f'<p class="headline-note">{r(headline)}</p>')
     for p in m.get("panels") or []:
         if p["kind"] == "table":
             th = "".join(f"<th>{r(c)}</th>" for c in p.get("columns") or [])
@@ -1787,13 +1813,15 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
         "frames": use_frames,
         "labels": {k: L[k] for k in ("next_step", "bottleneck", "decisions", "default", "owner_user", "owner_agent", "how", "unblocks")},
     }
+    payload["labels"].update(copied=L["copied"], you_chose=L["you_chose"], copied_toast=L["copied_toast"],
+                             copy_failed=L["copy_failed"])
     payload["labels"].update(expired=L["expired"], open=L["open_link"], part_detail=L["part_detail"],
                              you_are_here=L["you_are_here"], reached=localized("已到这里", "Reached here"),
                              milestone=localized("里程碑", "Milestone"))
     data = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
     replay = (f'<section class="card replay-context" id="replay-context" hidden><h2>{L["replay_context"]}</h2>'
               f'<p class="muted">{L["replay_hint"]}</p><div id="replay-text"></div></section>')
-    body = (f'{pin}{head}{track}{replay}<div class="workspace grid"><div class="main">{chain}{parts_html}</div>'
+    body = (f'{pin}{head}{brief_html}{track}{replay}<div class="workspace grid"><div class="main">{chain}{remaining}{parts_html}</div>'
             f'<aside class="aside">{"".join(side)}</aside></div>{render_analysis(analysis, "zh" if L is TEXT["zh"] else "en", (facts or {}).get("collected_at"))}'
             f'<footer class="footer"><details class="sources"><summary>{localized("查看依据与历史", "Evidence & history")}</summary>'
             f'<div class="source-content">{scrub}{details}<div class="foot">{footer}</div></div></details>'
@@ -1803,7 +1831,8 @@ def render_html(m, facts, marks, change_lines, style, prev_time, frames=None, an
             f'<button type="button" class="close" id="close-part" aria-label="{L["close"]}">×</button></div>'
             f'<div id="part-detail"></div></div></dialog>'
             f'<div id="peek" hidden role="dialog"><p id="peek-text"></p>'
-            f'<a id="peek-link" target="_blank" rel="noopener" hidden></a></div>')
+            f'<a id="peek-link" target="_blank" rel="noopener" hidden></a></div>'
+            f'<div class="toast" id="toast" role="status" aria-live="polite"></div>')
     page = PAGE.format(
         lang="zh-CN" if L is TEXT["zh"] else "en",
         title=html.escape(f'{P["name"]} · {L["title"]}'),

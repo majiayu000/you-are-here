@@ -228,19 +228,44 @@
     if (peek) { peek.hidden = true; document.body.appendChild(peek); }
   });
 
-  function copyText(text, li) {
-    function ok() { if (li) li.classList.add("copied-on"); }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(ok, function () { fallback(); });
-    } else fallback();
+  var toastTimer;
+  function toast(message) {
+    var el = document.getElementById("toast");
+    if (!el) return;
+    el.textContent = message;
+    el.classList.add("on");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove("on"); }, 2800);
+  }
+
+  // Copy an answer for the agent; the decision shows what was chosen either way.
+  function copyText(text, li, answer) {
+    var labels = DATA.labels || {};
+    function done(copied) {
+      if (li) {
+        li.classList.add("copied-on");
+        var chosen = li.querySelector(".chosen");
+        if (chosen) { chosen.textContent = (labels.you_chose || "") + "：" + answer; chosen.hidden = false; }
+        var accept = li.querySelector(".accept");
+        if (accept && copied) accept.textContent = (labels.copied || "") + " ✓";
+        var form = li.querySelector(".override-form");
+        if (form) form.hidden = true;
+      }
+      toast(copied ? labels.copied_toast : labels.copy_failed);
+    }
     function fallback() {
       var ta = document.createElement("textarea");
+      var copied = false;
       ta.value = text;
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand("copy"); ok(); } catch (e) {}
+      try { copied = document.execCommand("copy"); } catch (e) {}
       ta.parentNode.removeChild(ta);
+      done(copied);
     }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallback);
+    } else fallback();
   }
 
   function tick() {
@@ -292,14 +317,19 @@
     var accept = ev.target.closest ? ev.target.closest(".accept") : null;
     if (accept) {
       ev.stopPropagation();
-      copyText(accept.getAttribute("data-copy") || "", accept.closest("li"));
+      var owner = accept.closest("li");
+      copyText(accept.getAttribute("data-copy") || "", owner, owner ? owner.getAttribute("data-default") || "" : "");
       return;
     }
     var over = ev.target.closest ? ev.target.closest(".override") : null;
     if (over && over.tagName === "BUTTON") {
       ev.stopPropagation();
       var form = over.parentNode.parentNode.querySelector(".override-form");
-      if (form) form.hidden = !form.hidden;
+      if (form) {
+        form.hidden = !form.hidden;
+        over.setAttribute("aria-expanded", form.hidden ? "false" : "true");
+        if (!form.hidden && form.querySelector("input")) form.querySelector("input").focus();
+      }
       return;
     }
     var alt = ev.target.closest ? ev.target.closest(".altpath") : null;
@@ -329,10 +359,10 @@
     var text = input ? input.value.replace(/^\s+|\s+$/g, "") : "";
     if (!text) return;
     var li = form.closest("li");
-    var q = li ? (li.querySelector(".q").textContent || "") : "";
+    var q = li ? li.getAttribute("data-question") || "" : "";
     var id = li ? li.getAttribute("data-decision") : "";
     var tpl = DATA.answer_tpl || "Question: {Q}\nAnswer: {A}";
-    copyText(tpl.split("{Q}").join(q).split("{A}").join(text.replace(/"/g, "'")).split("{ID}").join(id), li);
+    copyText(tpl.split("{Q}").join(q).split("{A}").join(text.replace(/"/g, "'")).split("{ID}").join(id), li, text);
   });
 
   document.body.addEventListener("keydown", function (ev) {
