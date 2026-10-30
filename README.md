@@ -198,6 +198,6 @@ When requested, `scripts/session_stats.py` counts one Claude source session (inc
 subagent logs) and one selected Codex Skill invocation. The page adds only two token totals with
 collapsed accounting details. Statistics come from a local script, without a model rereading the
 conversation. Ordinary map updates do not perform deep conversation analysis. See the skill's
-“Optional token usage” section for the command and boundaries.
+`references/usage.md` for the command and boundaries.
 The current total is dated and matched to the map's collection time. A later collection without
 matching usage shows “Unavailable”; the prior invocation remains dated in the details.
