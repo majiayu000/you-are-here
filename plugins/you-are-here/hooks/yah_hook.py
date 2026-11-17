@@ -181,6 +181,21 @@ def start_refresh(repo, d, cfg, why, data=None):
     return f"you-are-here: map is stale ({why}); a background refresh started (log: {d}/bg.log)."
 
 
+SEVERE = "too far behind to quote"  # pmap.summary_text's wording for a map that must not be quoted
+NEEDS_USER = ("Background refresh failed", "User answered")
+
+
+def session_summary(text):
+    """At session start a map too far behind to quote says nothing, so a new session is not nudged into a
+    refresh nobody asked for; only what still needs the user (a failing refresh, answers newer than the map)
+    is passed on. `pmap.py summary` and "where are we?" still get the full stale notice."""
+    if not text or SEVERE not in text:
+        return text
+    lines = text.splitlines()
+    keep = [line for line in lines if line.startswith(NEEDS_USER)]
+    return "\n".join(lines[:2] + keep) if keep else None
+
+
 def prompt_of(data):
     return str(pick(data, "prompt", "user_prompt", "userPrompt") or "")
 
@@ -220,7 +235,7 @@ def main():
 
     if event == "SessionStart":
         if has_map:
-            emit(event, pmap.summary_text(repo, d))
+            emit(event, session_summary(pmap.summary_text(repo, d)))
         return
 
     if event == "UserPromptSubmit":
