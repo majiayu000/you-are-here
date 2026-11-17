@@ -118,10 +118,23 @@ class Hooks(unittest.TestCase):
         self.draw_map()
         for i in range(20):
             self.r.commit("src/core.py", f"{i}\n", f"c{i}")
+        self.assertIsNone(self.hook("SessionStart"))  # no nudge into a refresh nobody asked for
+        full = self.pmap("summary", self.r.dir).stdout  # asking for the summary still gets the notice
+        self.assertIn("too far behind to quote", full)
+        self.assertNotIn("Headline", full)
+        self.assertNotIn("Decision:", full)
+        self.assertIn("Update it", self.hook("UserPromptSubmit", {"prompt": "进度到哪了？"}))
+
+    def test_severely_stale_map_still_passes_on_what_needs_the_user(self):
+        self.draw_map()
+        self.pmap("auto", "on", self.r.dir)
+        self.bg_run("raise SystemExit(1)")
+        for i in range(20):
+            self.r.commit("src/core.py", f"{i}\n", f"c{i}")
         text = self.hook("SessionStart")
-        self.assertIn("too far behind to quote", text)
-        self.assertNotIn("Headline", text)
-        self.assertNotIn("Decision:", text)
+        self.assertIn("failed 1x in a row", text)
+        self.assertIn("you-are-here: project map", text)
+        self.assertNotIn("too far behind to quote", text)
 
     def test_long_run_suggests_map_and_auto(self):
         text = self.hook("UserPromptSubmit", {"prompt": "keep working on this overnight, don't ask me"})
