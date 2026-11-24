@@ -136,6 +136,17 @@ class Hooks(unittest.TestCase):
         self.assertIn("you-are-here: project map", text)
         self.assertNotIn("too far behind to quote", text)
 
+    def test_severely_stale_map_keeps_a_multiline_answer_whole(self):
+        self.draw_map()
+        answer = "Yes\nOnly deploy to staging; do not deploy to production"
+        self.pmap("answer", self.r.dir, "--question", "Deploy now?", "--answer", answer)
+        for i in range(20):
+            self.r.commit("src/core.py", f"{i}\n", f"c{i}")
+        text = self.hook("SessionStart")
+        self.assertIn(f"User answered (not yet on the map): Deploy now? -> {answer}", text)
+        self.assertIn("you-are-here: project map", text)
+        self.assertNotIn("too far behind to quote", text)
+
     def test_long_run_suggests_map_and_auto(self):
         text = self.hook("UserPromptSubmit", {"prompt": "keep working on this overnight, don't ask me"})
         self.assertIn("auto on", text)

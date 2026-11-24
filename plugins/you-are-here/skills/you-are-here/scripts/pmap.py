@@ -2145,8 +2145,8 @@ def pending_answer_lines(d):
             for x in load_answers(d) if (x.get("at") or "") >= since]
 
 
-def summary_text(repo, d, budget=1800):
-    """A few lines about the current map, for hooks to hand to the agent at session start."""
+def summary_records(repo, d):
+    """The current map in a few records (a multiline answer stays one record), for hooks at session start."""
     m = load_json(os.path.join(d, "map.json"))
     st = staleness(repo, d)
     if not isinstance(m, dict) or st["status"] == "none":
@@ -2166,7 +2166,7 @@ def summary_text(repo, d, budget=1800):
                      "PR/CI state, progress or decisions as current. Refresh it with the you-are-here skill before "
                      "relying on it.")
         lines += pending_answer_lines(d)  # newer than the map, so still worth passing on
-        return "\n".join(lines)[:budget]
+        return lines
     if isinstance(m.get("headline"), str):
         lines.append(f"Headline (as of {as_of}): {m['headline']}")
     cur = next((s.get("name") for s in m.get("milestones") or [] if isinstance(s, dict) and s.get("status") == "current"), None)
@@ -2188,8 +2188,7 @@ def summary_text(repo, d, budget=1800):
     stuck = [p.get("name") for p in m.get("parts") or [] if isinstance(p, dict) and p.get("status") == "stuck"]
     if stuck:
         lines.append(f"Stuck: {', '.join(map(str, stuck))}")
-    text = "\n".join(lines)
-    return text[:budget]
+    return lines
 
 
 INDEX_SKIP = SKIP_DIRS | {"Library", "Applications", ".Trash"}
@@ -2351,7 +2350,7 @@ def cmd_answer(a):
 def cmd_summary(a):
     repo = repo_root(a.repo)
     d = os.path.abspath(a.out) if a.out else os.path.join(repo, ".project-map")
-    t = summary_text(repo, d)
+    t = "\n".join(summary_records(repo, d) or [])[:1800]
     print(t if t else "no map yet")
 
 
